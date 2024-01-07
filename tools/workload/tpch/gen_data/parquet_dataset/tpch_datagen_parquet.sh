@@ -14,14 +14,13 @@
 # limitations under the License.
 
 batchsize=10240
-SPARK_HOME=/home/sparkuser/spark/
-spark_sql_perf_jar=/PATH/TO/spark-sql-perf_2.12-0.5.1-SNAPSHOT.jar
+SPARK_HOME=/localhdd/hza215/spark-3.1.1
+spark_sql_perf_jar=/localhdd/hza215/gluten/spark-sql-perf/target/scala-2.12/spark-sql-perf_2.12-0.5.1-SNAPSHOT.jar
 cat tpch_datagen_parquet.scala | ${SPARK_HOME}/bin/spark-shell \
   --num-executors 14 \
   --name tpch_gen_parquet \
   --executor-memory 25g \
   --executor-cores 8 \
-  --master yarn \
   --driver-memory 50g \
   --deploy-mode client \
   --conf spark.executor.memoryOverhead=1g \

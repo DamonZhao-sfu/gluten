@@ -17,18 +17,21 @@
 import com.databricks.spark.sql.perf.tpch._
 
 
-val scaleFactor = "100" // scaleFactor defines the size of the dataset to generate (in GB).
+val scaleFactor = "1" // scaleFactor defines the size of the dataset to generate (in GB).
 val numPartitions = 200  // how many dsdgen partitions to run - number of input tasks.
 
 val format = "parquet" // valid spark format like parquet "parquet".
-val rootDir = "/PATH/TO/TPCH_PARQUET_PATH" // root directory of location to create data in.
-val dbgenDir = "/PATH/TO/TPCH_DBGEN" // location of dbgen
+val rootDir = "/localhdd/hza215/tpch-parquet" // root directory of location to create data in.
+val dbgenDir = "/localhdd/hza215/tpch-dbgen" // location of dbgen
 
-val tables = new TPCHTables(spark.sqlContext,
+val sc = spark.sqlContext
+println("set sc")
+val tables = new TPCHTables(sc,
     dbgenDir = dbgenDir,
     scaleFactor = scaleFactor,
     useDoubleForDecimal = false, // true to replace DecimalType with DoubleType
     useStringForDate = false) // true to replace DateType with StringType
+println("new tpchTable")
 
 
 tables.genData(
