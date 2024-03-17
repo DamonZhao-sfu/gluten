@@ -1,0 +1,1 @@
+/localhdd/hza215/apache-maven-3.9.6/bin/mvn clean package -Pbackends-velox -Prss -Pspark-3.2 -DskipTests 

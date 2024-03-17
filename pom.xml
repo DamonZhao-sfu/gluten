@@ -35,6 +35,7 @@
     <module>package</module>
     <module>shims</module>
     <module>substrait/substrait-spark</module>
+    <module>backends-fpga</module>
   </modules>
 
   <properties>
