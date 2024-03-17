@@ -43,8 +43,8 @@ namespace DB
 {
 namespace ErrorCodes
 {
-    extern const int UNKNOWN_TYPE;
-    extern const int NUMBER_OF_ARGUMENTS_DOESNT_MATCH;
+extern const int UNKNOWN_TYPE;
+extern const int NUMBER_OF_ARGUMENTS_DOESNT_MATCH;
 }
 }
 
@@ -238,8 +238,13 @@ DB::DataTypePtr TypeParser::parseType(const substrait::Type & substrait_type, st
 }
 
 
-DB::Block TypeParser::buildBlockFromNamedStruct(const substrait::NamedStruct & struct_)
+DB::Block TypeParser::buildBlockFromNamedStruct(const substrait::NamedStruct & struct_, const std::string & low_card_cols)
 {
+    std::unordered_set<std::string> low_card_columns;
+    Poco::StringTokenizer tokenizer(low_card_cols, ",");
+    for (const auto & token : tokenizer)
+        low_card_columns.insert(token);
+
     DB::ColumnsWithTypeAndName internal_cols;
     internal_cols.reserve(struct_.names_size());
     std::list<std::string> field_names;
@@ -252,10 +257,16 @@ DB::Block TypeParser::buildBlockFromNamedStruct(const substrait::NamedStruct & s
         const auto & substrait_type = struct_.struct_().types(i);
         auto ch_type = parseType(substrait_type, &field_names);
 
+        if (low_card_columns.contains(name))
+        {
+            ch_type = std::make_shared<DB::DataTypeLowCardinality>(ch_type);
+        }
+
         // This is a partial aggregate data column.
         // It's type is special, must be a struct type contains all arguments types.
+        // Notice: there are some coincidence cases in which the type is not a struct type, e.g. name is "_1#913 + _2#914#928". We need to handle it.
         Poco::StringTokenizer name_parts(name, "#");
-        if (name_parts.count() >= 4)
+        if (name_parts.count() >= 4 && !name.contains(' '))
         {
             auto nested_data_type = DB::removeNullable(ch_type);
             const auto * tuple_type = typeid_cast<const DB::DataTypeTuple *>(nested_data_type.get());
@@ -270,8 +281,8 @@ DB::Block TypeParser::buildBlockFromNamedStruct(const substrait::NamedStruct & s
             auto agg_function_name = function_parser->getCHFunctionName(args_types);
             auto action = NullsAction::EMPTY;
             ch_type = AggregateFunctionFactory::instance()
-                            .get(agg_function_name, action, args_types, function_parser->getDefaultFunctionParameters(), properties)
-                            ->getStateType();
+                      .get(agg_function_name, action, args_types, function_parser->getDefaultFunctionParameters(), properties)
+                      ->getStateType();
         }
 
         internal_cols.push_back(ColumnWithTypeAndName(ch_type, name));
@@ -294,7 +305,7 @@ DB::Block TypeParser::buildBlockFromNamedStructWithoutDFS(const substrait::Named
     for (int i = 0; i < size; ++i)
     {
         const auto & name = names[i];
-        const auto & type =  types[i];
+        const auto & type = types[i];
         auto ch_type = parseType(type);
         columns.emplace_back(ColumnWithTypeAndName(ch_type, name));
     }
@@ -312,6 +323,12 @@ bool TypeParser::isTypeMatched(const substrait::Type & substrait_type, const Dat
     const auto a = removeNullable(parsed_ch_type);
     const auto b = removeNullable(ch_type);
     return a->equals(*b);
+}
+
+bool TypeParser::isTypeMatchedWithNullability(const substrait::Type & substrait_type, const DataTypePtr & ch_type)
+{
+    const auto parsed_ch_type = TypeParser::parseType(substrait_type);
+    return parsed_ch_type->equals(*ch_type);
 }
 
 DB::DataTypePtr TypeParser::tryWrapNullable(substrait::Type_Nullability nullable, DB::DataTypePtr nested_type)

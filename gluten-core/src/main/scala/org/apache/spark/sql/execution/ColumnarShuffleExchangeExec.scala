@@ -19,6 +19,7 @@ package org.apache.spark.sql.execution
 import io.glutenproject.backendsapi.BackendsApiManager
 import io.glutenproject.extension.GlutenPlan
 import io.glutenproject.extension.ValidationResult
+import io.glutenproject.sql.shims.SparkShimLoader
 
 import org.apache.spark._
 import org.apache.spark.internal.Logging
@@ -41,7 +42,8 @@ case class ColumnarShuffleExchangeExec(
     override val outputPartitioning: Partitioning,
     child: SparkPlan,
     shuffleOrigin: ShuffleOrigin = ENSURE_REQUIREMENTS,
-    projectOutputAttributes: Seq[Attribute])
+    projectOutputAttributes: Seq[Attribute],
+    advisoryPartitionSize: Option[Long] = None)
   extends ShuffleExchangeLike
   with GlutenPlan {
   private[sql] lazy val writeMetrics =
@@ -106,14 +108,14 @@ case class ColumnarShuffleExchangeExec(
   var cachedShuffleRDD: ShuffledColumnarBatchRDD = _
 
   override protected def doValidateInternal(): ValidationResult = {
-    if (
-      !BackendsApiManager.getValidatorApiInstance.doColumnarShuffleExchangeExecValidate(
-        outputPartitioning,
-        child)
-    ) {
-      return ValidationResult.notOk("Found schema check failure in shuffle exchange.")
-    }
-    ValidationResult.ok
+    BackendsApiManager.getValidatorApiInstance
+      .doColumnarShuffleExchangeExecValidate(outputPartitioning, child)
+      .map {
+        reason =>
+          ValidationResult.notOk(
+            s"Found schema check failure for schema ${child.schema} due to: $reason")
+      }
+      .getOrElse(ValidationResult.ok)
   }
 
   override def nodeName: String = "ColumnarExchange"
@@ -175,7 +177,9 @@ object ColumnarShuffleExchangeExec extends Logging {
       plan.outputPartitioning,
       child,
       plan.shuffleOrigin,
-      shuffleOutputAttributes)
+      shuffleOutputAttributes,
+      advisoryPartitionSize = SparkShimLoader.getSparkShims.getShuffleAdvisoryPartitionSize(plan)
+    )
   }
 
   // scalastyle:off argcount

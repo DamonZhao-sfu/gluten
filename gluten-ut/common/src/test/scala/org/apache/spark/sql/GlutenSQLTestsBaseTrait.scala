@@ -20,6 +20,9 @@ import io.glutenproject.GlutenConfig
 import io.glutenproject.utils.{BackendTestUtils, SystemParameters}
 
 import org.apache.spark.SparkConf
+import org.apache.spark.sql.GlutenTestConstants.GLUTEN_TEST
+import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, ShuffleQueryStageExec}
 import org.apache.spark.sql.test.SharedSparkSession
 
 import org.scalactic.source.Position
@@ -28,12 +31,16 @@ import org.scalatest.Tag
 /** Basic trait for Gluten SQL test cases. */
 trait GlutenSQLTestsBaseTrait extends SharedSparkSession with GlutenTestsBaseTrait {
 
+  protected def testGluten(testName: String, testTag: Tag*)(testFun: => Any)(implicit
+      pos: Position): Unit = {
+    test(GLUTEN_TEST + testName, testTag: _*)(testFun)
+  }
   override protected def test(testName: String, testTags: Tag*)(testFun: => Any)(implicit
       pos: Position): Unit = {
     if (shouldRun(testName)) {
       super.test(testName, testTags: _*)(testFun)
     } else {
-      logInfo(s"Ignore test case: $testName")
+      super.ignore(testName, testTags: _*)(testFun)
     }
   }
 
@@ -62,7 +69,6 @@ trait GlutenSQLTestsBaseTrait extends SharedSparkSession with GlutenTestsBaseTra
       conf
         .set("spark.io.compression.codec", "LZ4")
         .set("spark.gluten.sql.columnar.backend.ch.worker.id", "1")
-        .set("spark.gluten.sql.columnar.backend.ch.use.v2", "false")
         .set("spark.gluten.sql.enable.native.validation", "false")
         .set(GlutenConfig.GLUTEN_LIB_PATH, SystemParameters.getClickHouseLibPath)
         .set("spark.sql.files.openCostInBytes", "134217728")
@@ -72,5 +78,51 @@ trait GlutenSQLTestsBaseTrait extends SharedSparkSession with GlutenTestsBaseTra
     }
 
     conf
+  }
+
+  /**
+   * Get all the children plan of plans.
+   *
+   * @param plans
+   *   : the input plans.
+   * @return
+   */
+  private def getChildrenPlan(plans: Seq[SparkPlan]): Seq[SparkPlan] = {
+    if (plans.isEmpty) {
+      return Seq()
+    }
+
+    val inputPlans: Seq[SparkPlan] = plans.map {
+      case stage: ShuffleQueryStageExec => stage.plan
+      case plan => plan
+    }
+
+    var newChildren: Seq[SparkPlan] = Seq()
+    inputPlans.foreach {
+      plan =>
+        newChildren = newChildren ++ getChildrenPlan(plan.children)
+        // To avoid duplication of WholeStageCodegenXXX and its children.
+        if (!plan.nodeName.startsWith("WholeStageCodegen")) {
+          newChildren = newChildren :+ plan
+        }
+    }
+    newChildren
+  }
+
+  /**
+   * Get the executed plan of a data frame.
+   *
+   * @param df
+   *   : dataframe.
+   * @return
+   *   A sequence of executed plans.
+   */
+  def getExecutedPlan(df: DataFrame): Seq[SparkPlan] = {
+    df.queryExecution.executedPlan match {
+      case exec: AdaptiveSparkPlanExec =>
+        getChildrenPlan(Seq(exec.executedPlan))
+      case plan =>
+        getChildrenPlan(Seq(plan))
+    }
   }
 }

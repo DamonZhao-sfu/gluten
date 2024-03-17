@@ -50,8 +50,7 @@ arrow::Result<std::shared_ptr<ColumnarBatch>> recordBatch2VeloxColumnarBatch(con
   ArrowArray arrowArray;
   ArrowSchema arrowSchema;
   RETURN_NOT_OK(arrow::ExportRecordBatch(rb, &arrowArray, &arrowSchema));
-  auto vp = velox::importFromArrowAsOwner(
-      arrowSchema, arrowArray, ArrowUtils::getBridgeOptions(), gluten::defaultLeafVeloxMemoryPool().get());
+  auto vp = velox::importFromArrowAsOwner(arrowSchema, arrowArray, gluten::defaultLeafVeloxMemoryPool().get());
   return std::make_shared<VeloxColumnarBatch>(std::dynamic_pointer_cast<velox::RowVector>(vp));
 }
 
@@ -62,7 +61,7 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> toArrowBuffer(
     return nullptr;
   }
   ARROW_ASSIGN_OR_RAISE(auto arrowBuffer, arrow::AllocateResizableBuffer(buffer->size(), pool));
-  gluten::fastCopy(arrowBuffer->mutable_data(), buffer->asMutable<void>(), buffer->size());
+  gluten::fastCopy(arrowBuffer->mutable_data(), buffer->as<void>(), buffer->size());
   return arrowBuffer;
 }
 

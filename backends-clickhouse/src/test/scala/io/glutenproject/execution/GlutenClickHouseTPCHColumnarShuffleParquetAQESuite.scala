@@ -27,8 +27,7 @@ class GlutenClickHouseTPCHColumnarShuffleParquetAQESuite
   extends GlutenClickHouseTPCHAbstractSuite
   with AdaptiveSparkPlanHelper {
 
-  override protected val resourcePath: String =
-    "../../../../gluten-core/src/test/resources/tpch-data"
+  override protected val needCopyParquetToTablePath = true
 
   override protected val tablesPath: String = basePath + "/tpch-data"
   override protected val tpchQueries: String =
@@ -42,7 +41,6 @@ class GlutenClickHouseTPCHColumnarShuffleParquetAQESuite
       .set("spark.io.compression.codec", "LZ4")
       .set("spark.sql.shuffle.partitions", "5")
       .set("spark.sql.autoBroadcastJoinThreshold", "10MB")
-      .set("spark.gluten.sql.columnar.backend.ch.use.v2", "false")
       .set("spark.sql.adaptive.enabled", "true")
       .set("spark.gluten.sql.columnar.backend.ch.shuffle.hash.algorithm", "sparkMurmurHash3_32")
       .set(
@@ -51,7 +49,7 @@ class GlutenClickHouseTPCHColumnarShuffleParquetAQESuite
   }
 
   override protected def createTPCHNotNullTables(): Unit = {
-    createTPCHParquetTables(tablesPath)
+    createNotNullTPCHTablesInParquet(tablesPath)
   }
 
   test("TPCH Q1") {
@@ -67,22 +65,22 @@ class GlutenClickHouseTPCHColumnarShuffleParquetAQESuite
 
         assert(plans(4).metrics("numFiles").value === 1)
         assert(plans(4).metrics("pruningTime").value === -1)
-        assert(plans(4).metrics("filesSize").value === 17777735)
-        assert(plans(4).metrics("outputRows").value === 600572)
+        assert(plans(4).metrics("filesSize").value === 19230111)
+        assert(plans(4).metrics("numOutputRows").value === 600572)
 
-        assert(plans(3).metrics("inputRows").value === 591673)
-        assert(plans(3).metrics("outputRows").value === 4)
+        assert(plans(3).metrics("numInputRows").value === 591673)
+        assert(plans(3).metrics("numOutputRows").value === 4)
         assert(plans(3).metrics("outputVectors").value === 1)
 
-        assert(plans(2).metrics("inputRows").value === 8)
-        assert(plans(2).metrics("outputRows").value === 8)
+        assert(plans(2).metrics("numInputRows").value === 8)
+        assert(plans(2).metrics("numOutputRows").value === 8)
 
         // Execute Sort operator, it will read the data twice.
-        assert(plans(1).metrics("outputRows").value === 8)
+        assert(plans(1).metrics("numOutputRows").value === 8)
         assert(plans(1).metrics("outputVectors").value === 2)
 
-        assert(plans(0).metrics("inputRows").value === 4)
-        assert(plans(0).metrics("outputRows").value === 4)
+        assert(plans(0).metrics("numInputRows").value === 4)
+        assert(plans(0).metrics("numOutputRows").value === 4)
     }
   }
 
@@ -99,14 +97,14 @@ class GlutenClickHouseTPCHColumnarShuffleParquetAQESuite
 
           assert(plans(2).metrics("numFiles").value === 1)
           assert(plans(2).metrics("pruningTime").value === -1)
-          assert(plans(2).metrics("filesSize").value === 17777735)
+          assert(plans(2).metrics("filesSize").value === 19230111)
 
-          assert(plans(1).metrics("inputRows").value === 591673)
-          assert(plans(1).metrics("outputRows").value === 4)
+          assert(plans(1).metrics("numInputRows").value === 591673)
+          assert(plans(1).metrics("numOutputRows").value === 4)
           assert(plans(1).metrics("outputVectors").value === 1)
 
           // Execute Sort operator, it will read the data twice.
-          assert(plans(0).metrics("outputRows").value === 8)
+          assert(plans(0).metrics("numOutputRows").value === 8)
           assert(plans(0).metrics("outputVectors").value === 2)
       }
     }
@@ -139,17 +137,17 @@ class GlutenClickHouseTPCHColumnarShuffleParquetAQESuite
 
           assert(inputIteratorTransformers.size == 4)
 
-          assert(inputIteratorTransformers(3).metrics("inputRows").value === 324322)
-          assert(inputIteratorTransformers(3).metrics("outputRows").value === 324322)
+          assert(inputIteratorTransformers(3).metrics("numInputRows").value === 324322)
+          assert(inputIteratorTransformers(3).metrics("numOutputRows").value === 324322)
 
-          assert(inputIteratorTransformers(2).metrics("inputRows").value === 72678)
-          assert(inputIteratorTransformers(2).metrics("outputRows").value === 72678)
+          assert(inputIteratorTransformers(2).metrics("numInputRows").value === 72678)
+          assert(inputIteratorTransformers(2).metrics("numOutputRows").value === 72678)
 
-          assert(inputIteratorTransformers(1).metrics("inputRows").value === 3111)
-          assert(inputIteratorTransformers(1).metrics("outputRows").value === 3111)
+          assert(inputIteratorTransformers(1).metrics("numInputRows").value === 3111)
+          assert(inputIteratorTransformers(1).metrics("numOutputRows").value === 3111)
 
-          assert(inputIteratorTransformers(0).metrics("inputRows").value === 15224)
-          assert(inputIteratorTransformers(0).metrics("outputRows").value === 15224)
+          assert(inputIteratorTransformers(0).metrics("numInputRows").value === 15224)
+          assert(inputIteratorTransformers(0).metrics("numOutputRows").value === 15224)
       }
     }
   }
@@ -164,7 +162,7 @@ class GlutenClickHouseTPCHColumnarShuffleParquetAQESuite
         df =>
           assert(df.queryExecution.executedPlan.isInstanceOf[AdaptiveSparkPlanExec])
           val bhjRes = collect(df.queryExecution.executedPlan) {
-            case bhj: BroadcastHashJoinExecTransformer => bhj
+            case bhj: BroadcastHashJoinExecTransformerBase => bhj
           }
           assert(bhjRes.isEmpty)
       }
@@ -183,8 +181,7 @@ class GlutenClickHouseTPCHColumnarShuffleParquetAQESuite
   test("TPCH Q7 - with shuffle.partitions=1") {
     withSQLConf(
       ("spark.sql.shuffle.partitions", "1"),
-      ("spark.sql.autoBroadcastJoinThreshold", "-1"),
-      ("spark.gluten.sql.columnar.backend.ch.use.v2", "true")) {
+      ("spark.sql.autoBroadcastJoinThreshold", "-1")) {
       runTPCHQuery(7) { df => }
     }
   }
@@ -192,8 +189,7 @@ class GlutenClickHouseTPCHColumnarShuffleParquetAQESuite
   test("TPCH Q7") {
     withSQLConf(
       ("spark.sql.shuffle.partitions", "2"),
-      ("spark.sql.autoBroadcastJoinThreshold", "-1"),
-      ("spark.gluten.sql.columnar.backend.ch.use.v2", "true")) {
+      ("spark.sql.autoBroadcastJoinThreshold", "-1")) {
       runTPCHQuery(7) { df => }
     }
   }
@@ -201,8 +197,7 @@ class GlutenClickHouseTPCHColumnarShuffleParquetAQESuite
   test("TPCH Q8") {
     withSQLConf(
       ("spark.sql.shuffle.partitions", "1"),
-      ("spark.sql.autoBroadcastJoinThreshold", "-1"),
-      ("spark.gluten.sql.columnar.backend.ch.use.v2", "true")) {
+      ("spark.sql.autoBroadcastJoinThreshold", "-1")) {
       runTPCHQuery(8) { df => }
     }
   }
@@ -237,8 +232,7 @@ class GlutenClickHouseTPCHColumnarShuffleParquetAQESuite
   test("TPCH Q14") {
     withSQLConf(
       ("spark.sql.shuffle.partitions", "1"),
-      ("spark.sql.autoBroadcastJoinThreshold", "-1"),
-      ("spark.gluten.sql.columnar.backend.ch.use.v2", "true")) {
+      ("spark.sql.autoBroadcastJoinThreshold", "-1")) {
       runTPCHQuery(14) { df => }
     }
   }
@@ -285,10 +279,10 @@ class GlutenClickHouseTPCHColumnarShuffleParquetAQESuite
           case scanExec: BasicScanExecTransformer => scanExec
           case filterExec: FilterExecTransformerBase => filterExec
         }
-        assert(plans(2).metrics("inputRows").value === 600572)
-        assert(plans(2).metrics("outputRows").value === 379809)
+        assert(plans(2).metrics("numInputRows").value === 600572)
+        assert(plans(2).metrics("numOutputRows").value === 379809)
 
-        assert(plans(3).metrics("outputRows").value === 600572)
+        assert(plans(3).metrics("numOutputRows").value === 600572)
     }
   }
 
@@ -299,8 +293,7 @@ class GlutenClickHouseTPCHColumnarShuffleParquetAQESuite
         val adaptiveSparkPlanExec = collectWithSubqueries(df.queryExecution.executedPlan) {
           case adaptive: AdaptiveSparkPlanExec => adaptive
         }
-        assert(adaptiveSparkPlanExec.size == 3)
-        assert(adaptiveSparkPlanExec(1) == adaptiveSparkPlanExec(2))
+        assert(adaptiveSparkPlanExec.size == 2)
     }
   }
 

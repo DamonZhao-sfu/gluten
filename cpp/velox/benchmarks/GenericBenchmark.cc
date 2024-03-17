@@ -31,21 +31,34 @@
 #include "config/GlutenConfig.h"
 #include "shuffle/LocalPartitionWriter.h"
 #include "shuffle/VeloxShuffleWriter.h"
+#include "shuffle/rss/CelebornPartitionWriter.h"
+#include "utils/StringUtil.h"
 #include "utils/VeloxArrowUtils.h"
 #include "utils/exception.h"
+#include "utils/tests/LocalRssClient.h"
 #include "velox/exec/PlanNodeStats.h"
 
 using namespace gluten;
 
 namespace {
-DEFINE_bool(skip_input, false, "Skip specifying input files.");
 DEFINE_bool(with_shuffle, false, "Add shuffle split at end.");
 DEFINE_string(partitioning, "rr", "Short partitioning name. Valid options are rr, hash, range, single");
+DEFINE_bool(celeborn, false, "Mocking celeborn shuffle.");
 DEFINE_bool(zstd, false, "Use ZSTD as shuffle compression codec");
 DEFINE_bool(qat_gzip, false, "Use QAT GZIP as shuffle compression codec");
 DEFINE_bool(qat_zstd, false, "Use QAT ZSTD as shuffle compression codec");
 DEFINE_bool(iaa_gzip, false, "Use IAA GZIP as shuffle compression codec");
 DEFINE_int32(shuffle_partitions, 200, "Number of shuffle split (reducer) partitions");
+DEFINE_bool(run_example, false, "Run the example and exit.");
+
+DEFINE_string(plan, "", "Path to input json file of the substrait plan.");
+DEFINE_string(
+    split,
+    "",
+    "Path to input json file of the splits. Only valid for simulating the first stage. Use comma-separated list for multiple splits.");
+DEFINE_string(data, "", "Path to input data files in parquet format. Only valid for simulating the middle stage.");
+DEFINE_string(conf, "", "Path to the configuration file.");
+DEFINE_string(write_path, "/tmp", "Path for simulate write task.");
 
 struct WriterMetrics {
   int64_t splitTime;
@@ -54,47 +67,54 @@ struct WriterMetrics {
   int64_t compressTime;
 };
 
-std::shared_ptr<VeloxShuffleWriter> createShuffleWriter(VeloxMemoryManager* memoryManager) {
-  std::shared_ptr<ShuffleWriter::PartitionWriterCreator> partitionWriterCreator =
-      std::make_shared<LocalPartitionWriterCreator>();
-
-  auto options = ShuffleWriterOptions::defaults();
-  options.memory_pool = memoryManager->getArrowMemoryPool();
-  options.partitioning = gluten::toPartitioning(FLAGS_partitioning);
+std::shared_ptr<VeloxShuffleWriter> createShuffleWriter(
+    VeloxMemoryManager* memoryManager,
+    const std::string& dataFile,
+    const std::vector<std::string>& localDirs) {
+  PartitionWriterOptions partitionWriterOptions{};
   if (FLAGS_zstd) {
-    options.codec_backend = CodecBackend::NONE;
-    options.compression_type = arrow::Compression::ZSTD;
+    partitionWriterOptions.codecBackend = CodecBackend::NONE;
+    partitionWriterOptions.compressionType = arrow::Compression::ZSTD;
   } else if (FLAGS_qat_gzip) {
-    options.codec_backend = CodecBackend::QAT;
-    options.compression_type = arrow::Compression::GZIP;
+    partitionWriterOptions.codecBackend = CodecBackend::QAT;
+    partitionWriterOptions.compressionType = arrow::Compression::GZIP;
   } else if (FLAGS_qat_zstd) {
-    options.codec_backend = CodecBackend::QAT;
-    options.compression_type = arrow::Compression::ZSTD;
+    partitionWriterOptions.codecBackend = CodecBackend::QAT;
+    partitionWriterOptions.compressionType = arrow::Compression::ZSTD;
   } else if (FLAGS_iaa_gzip) {
-    options.codec_backend = CodecBackend::IAA;
-    options.compression_type = arrow::Compression::GZIP;
+    partitionWriterOptions.codecBackend = CodecBackend::IAA;
+    partitionWriterOptions.compressionType = arrow::Compression::GZIP;
   }
 
-  GLUTEN_THROW_NOT_OK(setLocalDirsAndDataFileFromEnv(options));
+  std::unique_ptr<PartitionWriter> partitionWriter;
+  if (FLAGS_celeborn) {
+    auto rssClient = std::make_unique<LocalRssClient>(dataFile);
+    partitionWriter = std::make_unique<CelebornPartitionWriter>(
+        FLAGS_shuffle_partitions,
+        std::move(partitionWriterOptions),
+        memoryManager->getArrowMemoryPool(),
+        std::move(rssClient));
+  } else {
+    partitionWriter = std::make_unique<LocalPartitionWriter>(
+        FLAGS_shuffle_partitions,
+        std::move(partitionWriterOptions),
+        memoryManager->getArrowMemoryPool(),
+        dataFile,
+        localDirs);
+  }
 
+  auto options = ShuffleWriterOptions{};
+  options.partitioning = gluten::toPartitioning(FLAGS_partitioning);
   GLUTEN_ASSIGN_OR_THROW(
       auto shuffleWriter,
       VeloxShuffleWriter::create(
           FLAGS_shuffle_partitions,
-          std::move(partitionWriterCreator),
+          std::move(partitionWriter),
           std::move(options),
-          memoryManager->getLeafMemoryPool()));
+          memoryManager->getLeafMemoryPool(),
+          memoryManager->getArrowMemoryPool()));
 
   return shuffleWriter;
-}
-
-void cleanup(const std::shared_ptr<VeloxShuffleWriter>& shuffleWriter) {
-  auto dataFile = std::filesystem::path(shuffleWriter->dataFile());
-  const auto& parentDir = dataFile.parent_path();
-  std::filesystem::remove(dataFile);
-  if (std::filesystem::is_empty(parentDir)) {
-    std::filesystem::remove(parentDir);
-  }
 }
 
 void populateWriterMetrics(
@@ -112,8 +132,9 @@ void populateWriterMetrics(
 } // namespace
 
 auto BM_Generic = [](::benchmark::State& state,
-                     const std::string& substraitJsonFile,
-                     const std::vector<std::string>& inputFiles,
+                     const std::string& planFile,
+                     const std::vector<std::string>& splitFiles,
+                     const std::vector<std::string>& dataFiles,
                      const std::unordered_map<std::string, std::string>& conf,
                      FileReaderType readerType) {
   // Pin each threads to different CPU# starting from 0 or --cpu.
@@ -125,8 +146,11 @@ auto BM_Generic = [](::benchmark::State& state,
   memory::MemoryManager::testingSetInstance({});
   auto memoryManager = getDefaultMemoryManager();
   auto runtime = Runtime::create(kVeloxRuntimeKind, conf);
-  const auto& filePath = substraitJsonFile;
-  auto plan = getPlanFromFile(filePath);
+  auto plan = getPlanFromFile("Plan", planFile);
+  std::vector<std::string> splits{};
+  for (const auto& splitFile : splitFiles) {
+    splits.push_back(getPlanFromFile("ReadRel.LocalFiles", splitFile));
+  }
   auto startTime = std::chrono::steady_clock::now();
   int64_t collectBatchTime = 0;
   WriterMetrics writerMetrics{};
@@ -134,8 +158,8 @@ auto BM_Generic = [](::benchmark::State& state,
   for (auto _ : state) {
     std::vector<std::shared_ptr<gluten::ResultIterator>> inputIters;
     std::vector<FileReaderIterator*> inputItersRaw;
-    if (!inputFiles.empty()) {
-      for (const auto& input : inputFiles) {
+    if (!dataFiles.empty()) {
+      for (const auto& input : dataFiles) {
         inputIters.push_back(getInputIteratorFromFileReader(input, readerType));
       }
       std::transform(
@@ -146,15 +170,22 @@ auto BM_Generic = [](::benchmark::State& state,
             return static_cast<FileReaderIterator*>(iter->getInputIter());
           });
     }
-
-    runtime->parsePlan(reinterpret_cast<uint8_t*>(plan.data()), plan.size(), {});
+    runtime->injectWriteFilesTempPath(FLAGS_write_path);
+    runtime->parsePlan(reinterpret_cast<uint8_t*>(plan.data()), plan.size(), {}, std::nullopt);
+    for (auto& split : splits) {
+      runtime->parseSplitInfo(reinterpret_cast<uint8_t*>(split.data()), split.size(), std::nullopt);
+    }
     auto resultIter =
         runtime->createResultIterator(memoryManager.get(), "/tmp/test-spill", std::move(inputIters), conf);
     auto veloxPlan = dynamic_cast<gluten::VeloxRuntime*>(runtime)->getVeloxPlan();
     if (FLAGS_with_shuffle) {
       int64_t shuffleWriteTime;
       TIME_NANO_START(shuffleWriteTime);
-      const auto& shuffleWriter = createShuffleWriter(memoryManager.get());
+      std::string dataFile;
+      std::vector<std::string> localDirs;
+      bool isFromEnv;
+      GLUTEN_THROW_NOT_OK(setLocalDirsAndDataFileFromEnv(dataFile, localDirs, isFromEnv));
+      const auto& shuffleWriter = createShuffleWriter(memoryManager.get(), dataFile, localDirs);
       while (resultIter->hasNext()) {
         GLUTEN_THROW_NOT_OK(shuffleWriter->split(resultIter->next(), ShuffleWriter::kMinMemLimit));
       }
@@ -162,7 +193,7 @@ auto BM_Generic = [](::benchmark::State& state,
       TIME_NANO_END(shuffleWriteTime);
       populateWriterMetrics(shuffleWriter, shuffleWriteTime, writerMetrics);
       // Cleanup shuffle outputs
-      cleanup(shuffleWriter);
+      cleanupShuffleOutput(dataFile, localDirs, isFromEnv);
     } else {
       // May write the output into file.
       ArrowSchema cSchema;
@@ -184,7 +215,10 @@ auto BM_Generic = [](::benchmark::State& state,
           return;
         }
         if (FLAGS_print_result) {
-          std::cout << maybeBatch.ValueOrDie()->ToString() << std::endl;
+          LOG(INFO) << maybeBatch.ValueOrDie()->ToString();
+        }
+        if (!FLAGS_write_file.empty()) {
+          GLUTEN_THROW_NOT_OK(writer.writeInBatches(maybeBatch.ValueOrDie()));
         }
       }
 
@@ -201,10 +235,10 @@ auto BM_Generic = [](::benchmark::State& state,
         });
 
     auto* rawIter = static_cast<gluten::WholeStageResultIterator*>(resultIter->getInputIter());
-    const auto& task = rawIter->task_;
-    const auto& planNode = rawIter->veloxPlan_;
+    const auto* task = rawIter->task();
+    const auto* planNode = rawIter->veloxPlan();
     auto statsStr = facebook::velox::exec::printPlanWithStats(*planNode, task->taskStats(), true);
-    std::cout << statsStr << std::endl;
+    LOG(INFO) << statsStr;
   }
   Runtime::release(runtime);
 
@@ -229,67 +263,159 @@ int main(int argc, char** argv) {
   ::benchmark::Initialize(&argc, argv);
   gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-  std::string substraitJsonFile;
-  std::vector<std::string> inputFiles;
-  std::unordered_map<std::string, std::string> conf;
+  // Init Velox backend.
+  std::unordered_map<std::string, std::string> backendConf;
+  std::unordered_map<std::string, std::string> sessionConf;
+  backendConf.insert({gluten::kSparkBatchSize, std::to_string(FLAGS_batch_size)});
+  backendConf.insert({kDebugModeEnabled, "true"});
+  if (!FLAGS_conf.empty()) {
+    abortIfFileNotExists(FLAGS_conf);
+    std::ifstream file(FLAGS_conf);
 
-  conf.insert({gluten::kSparkBatchSize, FLAGS_batch_size});
-  conf.insert({kDebugModeEnabled, "true"});
-  initVeloxBackend(conf);
+    if (!file.is_open()) {
+      LOG(ERROR) << "Unable to open configuration file.";
+      ::benchmark::Shutdown();
+      std::exit(EXIT_FAILURE);
+    }
 
-  try {
-    if (argc < 2) {
-      std::cout
-          << "No input args. Usage: " << std::endl
-          << "./generic_benchmark /absolute-path/to/substrait_json_file /absolute-path/to/data_file_1 /absolute-path/to/data_file_2 ..."
-          << std::endl;
-      std::cout << "Running example..." << std::endl;
-      inputFiles.resize(2);
-      substraitJsonFile = getGeneratedFilePath("example.json");
-      inputFiles[0] = getGeneratedFilePath("example_orders");
-      inputFiles[1] = getGeneratedFilePath("example_lineitem");
-    } else {
-      substraitJsonFile = argv[1];
-      abortIfFileNotExists(substraitJsonFile);
-      std::cout << "Using substrait json file: " << std::endl << substraitJsonFile << std::endl;
-      std::cout << "Using " << argc - 2 << " input data file(s): " << std::endl;
-      for (auto i = 2; i < argc; ++i) {
-        inputFiles.emplace_back(argv[i]);
-        abortIfFileNotExists(inputFiles.back());
-        std::cout << inputFiles.back() << std::endl;
+    // Parse the ini file.
+    // Load all key-values under [Backend Conf] to backendConf, under [Session Conf] to sessionConf.
+    // If no [Session Conf] section specified, all key-values are loaded for both backendConf and sessionConf.
+    bool isBackendConf = true;
+    std::string line;
+    while (std::getline(file, line)) {
+      if (line.empty() || line[0] == ';') {
+        continue;
+      }
+      if (line[0] == '[') {
+        if (line == "[Backend Conf]") {
+          isBackendConf = true;
+        } else if (line == "[Session Conf]") {
+          isBackendConf = false;
+        } else {
+          LOG(ERROR) << "Invalid section: " << line;
+          ::benchmark::Shutdown();
+          std::exit(EXIT_FAILURE);
+        }
+        continue;
+      }
+      std::istringstream iss(line);
+      std::string key, value;
+
+      iss >> key;
+
+      // std::ws is used to consume any leading whitespace.
+      std::getline(iss >> std::ws, value);
+
+      if (isBackendConf) {
+        backendConf[key] = value;
+      } else {
+        sessionConf[key] = value;
       }
     }
-  } catch (const std::exception& e) {
-    std::cout << "Failed to run benchmark: " << e.what() << std::endl;
-    ::benchmark::Shutdown();
-    std::exit(EXIT_FAILURE);
+  }
+  if (sessionConf.empty()) {
+    sessionConf = backendConf;
   }
 
-#define GENERIC_BENCHMARK(NAME, READER_TYPE)                                                                      \
-  do {                                                                                                            \
-    auto* bm = ::benchmark::RegisterBenchmark(NAME, BM_Generic, substraitJsonFile, inputFiles, conf, READER_TYPE) \
-                   ->MeasureProcessCPUTime()                                                                      \
-                   ->UseRealTime();                                                                               \
-    if (FLAGS_threads > 0) {                                                                                      \
-      bm->Threads(FLAGS_threads);                                                                                 \
-    } else {                                                                                                      \
-      bm->ThreadRange(1, std::thread::hardware_concurrency());                                                    \
-    }                                                                                                             \
-    if (FLAGS_iterations > 0) {                                                                                   \
-      bm->Iterations(FLAGS_iterations);                                                                           \
-    }                                                                                                             \
+  initVeloxBackend(backendConf);
+
+  // Parse substrait plan, split file and data files.
+  std::string substraitJsonFile = FLAGS_plan;
+  std::vector<std::string> splitFiles{};
+  std::vector<std::string> dataFiles{};
+
+  if (FLAGS_run_example) {
+    LOG(INFO) << "Running example...";
+    dataFiles.resize(2);
+    try {
+      substraitJsonFile = getGeneratedFilePath("example.json");
+      dataFiles[0] = getGeneratedFilePath("example_orders");
+      dataFiles[1] = getGeneratedFilePath("example_lineitem");
+    } catch (const std::exception& e) {
+      LOG(ERROR) << "Failed to run example. " << e.what();
+      ::benchmark::Shutdown();
+      std::exit(EXIT_FAILURE);
+    }
+  } else {
+    // Validate input args.
+    std::string errorMsg{};
+    if (substraitJsonFile.empty()) {
+      errorMsg = "Missing '--plan' option.";
+    } else if (!checkPathExists(substraitJsonFile)) {
+      errorMsg = "File path does not exist: " + substraitJsonFile;
+    } else if (FLAGS_split.empty() && FLAGS_data.empty()) {
+      errorMsg = "Missing '--split' or '--data' option.";
+    } else if (!FLAGS_split.empty() && !FLAGS_data.empty()) {
+      errorMsg = "Duplicated option '--split' and '--data'.";
+    }
+
+    try {
+      if (!FLAGS_data.empty()) {
+        dataFiles = gluten::splitPaths(FLAGS_data, true);
+      } else {
+        splitFiles = gluten::splitPaths(FLAGS_split, true);
+      }
+    } catch (const std::exception& e) {
+      errorMsg = e.what();
+    }
+
+    if (!errorMsg.empty()) {
+      LOG(ERROR) << "Incorrect usage: " << errorMsg << std::endl
+                 << "If simulating a first stage, the usage is:" << std::endl
+                 << "./generic_benchmark "
+                 << "--plan /absolute-path/to/substrait_json_file "
+                 << "--split /absolute-path/to/split_json_file_1,/abosolute-path/to/split_json_file_2,..." << std::endl
+                 << "If simulating a middle stage, the usage is:" << std::endl
+                 << "./generic_benchmark "
+                 << "--plan /absolute-path/to/substrait_json_file "
+                 << "--data /absolute-path/to/data_file_1,/absolute-path/to/data_file_2,...";
+      LOG(ERROR) << "*** Please check docs/developers/MicroBenchmarks.md for the full usage. ***";
+      ::benchmark::Shutdown();
+      std::exit(EXIT_FAILURE);
+    }
+  }
+
+  // Check whether input files exist.
+  LOG(INFO) << "Using substrait json file: " << std::endl << substraitJsonFile;
+  if (!splitFiles.empty()) {
+    LOG(INFO) << "Using " << splitFiles.size() << " input split file(s): ";
+    for (const auto& splitFile : splitFiles) {
+      LOG(INFO) << splitFile;
+    }
+  } else {
+    LOG(INFO) << "Using " << dataFiles.size() << " input data file(s): ";
+    for (const auto& dataFile : dataFiles) {
+      LOG(INFO) << dataFile;
+    }
+  }
+
+#define GENERIC_BENCHMARK(NAME, READER_TYPE)                                                             \
+  do {                                                                                                   \
+    auto* bm = ::benchmark::RegisterBenchmark(                                                           \
+                   NAME, BM_Generic, substraitJsonFile, splitFiles, dataFiles, sessionConf, READER_TYPE) \
+                   ->MeasureProcessCPUTime()                                                             \
+                   ->UseRealTime();                                                                      \
+    if (FLAGS_threads > 0) {                                                                             \
+      bm->Threads(FLAGS_threads);                                                                        \
+    } else {                                                                                             \
+      bm->ThreadRange(1, std::thread::hardware_concurrency());                                           \
+    }                                                                                                    \
+    if (FLAGS_iterations > 0) {                                                                          \
+      bm->Iterations(FLAGS_iterations);                                                                  \
+    }                                                                                                    \
   } while (0)
 
-#if 0
-  std::cout << "FLAGS_threads:" << FLAGS_threads << std::endl;
-  std::cout << "FLAGS_iterations:" << FLAGS_iterations << std::endl;
-  std::cout << "FLAGS_cpu:" << FLAGS_cpu << std::endl;
-  std::cout << "FLAGS_print_result:" << FLAGS_print_result << std::endl;
-  std::cout << "FLAGS_write_file:" << FLAGS_write_file << std::endl;
-  std::cout << "FLAGS_batch_size:" << FLAGS_batch_size << std::endl;
-#endif
+  LOG(INFO) << "Using options: ";
+  LOG(INFO) << "threads: " << FLAGS_threads;
+  LOG(INFO) << "iterations: " << FLAGS_iterations;
+  LOG(INFO) << "cpu: " << FLAGS_cpu;
+  LOG(INFO) << "print_result: " << FLAGS_print_result;
+  LOG(INFO) << "write_file: " << FLAGS_write_file;
+  LOG(INFO) << "batch_size: " << FLAGS_batch_size;
+  LOG(INFO) << "write_path: " << FLAGS_write_path;
 
-  if (FLAGS_skip_input) {
+  if (dataFiles.empty()) {
     GENERIC_BENCHMARK("SkipInput", FileReaderType::kNone);
   } else {
     GENERIC_BENCHMARK("InputFromBatchVector", FileReaderType::kBuffered);

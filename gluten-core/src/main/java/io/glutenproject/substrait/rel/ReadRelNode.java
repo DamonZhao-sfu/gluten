@@ -16,8 +16,8 @@
  */
 package io.glutenproject.substrait.rel;
 
-import io.glutenproject.substrait.SubstraitContext;
 import io.glutenproject.substrait.expression.ExpressionNode;
+import io.glutenproject.substrait.extensions.AdvancedExtensionNode;
 import io.glutenproject.substrait.type.ColumnTypeNode;
 import io.glutenproject.substrait.type.TypeNode;
 
@@ -26,59 +26,29 @@ import io.substrait.proto.ReadRel;
 import io.substrait.proto.Rel;
 import io.substrait.proto.RelCommon;
 import io.substrait.proto.Type;
-import org.apache.spark.sql.types.StructField;
-import org.apache.spark.sql.types.StructType;
 
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 
 public class ReadRelNode implements RelNode, Serializable {
   private final List<TypeNode> types = new ArrayList<>();
   private final List<String> names = new ArrayList<>();
   private final List<ColumnTypeNode> columnTypeNodes = new ArrayList<>();
-  private final SubstraitContext context;
   private final ExpressionNode filterNode;
-  private StructType dataSchema;
-  private Map<String, String> properties;
+  private final AdvancedExtensionNode extensionNode;
 
   ReadRelNode(
       List<TypeNode> types,
       List<String> names,
-      SubstraitContext context,
       ExpressionNode filterNode,
-      List<ColumnTypeNode> columnTypeNodes) {
+      List<ColumnTypeNode> columnTypeNodes,
+      AdvancedExtensionNode extensionNode) {
     this.types.addAll(types);
     this.names.addAll(names);
-    this.context = context;
     this.filterNode = filterNode;
     this.columnTypeNodes.addAll(columnTypeNodes);
-  }
-
-  public void setDataSchema(StructType schema) {
-    this.dataSchema = new StructType();
-    for (StructField field : schema.fields()) {
-      Boolean found = false;
-      for (int i = 0; i < names.size(); i++) {
-        // Case-insensitive schema matching
-        if (field.name().equalsIgnoreCase(names.get(i))) {
-          this.dataSchema =
-              this.dataSchema.add(
-                  names.get(i), field.dataType(), field.nullable(), field.metadata());
-          found = true;
-          break;
-        }
-      }
-
-      if (!found) {
-        this.dataSchema = this.dataSchema.add(field);
-      }
-    }
-  }
-
-  public void setProperties(Map<String, String> properties) {
-    this.properties = properties;
+    this.extensionNode = extensionNode;
   }
 
   @Override
@@ -106,22 +76,15 @@ public class ReadRelNode implements RelNode, Serializable {
     ReadRel.Builder readBuilder = ReadRel.newBuilder();
     readBuilder.setCommon(relCommonBuilder.build());
     readBuilder.setBaseSchema(nStructBuilder.build());
+
     if (filterNode != null) {
       readBuilder.setFilter(filterNode.toProtobuf());
     }
-    if (context.getSplitInfos() != null && !context.getSplitInfos().isEmpty()) {
-      SplitInfo currentSplitInfo = context.getCurrentSplitInfo();
-      if (currentSplitInfo instanceof LocalFilesNode) {
-        LocalFilesNode filesNode = (LocalFilesNode) currentSplitInfo;
-        if (dataSchema != null) {
-          filesNode.setFileSchema(dataSchema);
-          filesNode.setFileReadProperties(properties);
-        }
-        readBuilder.setLocalFiles(((LocalFilesNode) currentSplitInfo).toProtobuf());
-      } else if (currentSplitInfo instanceof ExtensionTableNode) {
-        readBuilder.setExtensionTable(((ExtensionTableNode) currentSplitInfo).toProtobuf());
-      }
+
+    if (extensionNode != null) {
+      readBuilder.setAdvancedExtension(extensionNode.toProtobuf());
     }
+
     Rel.Builder builder = Rel.newBuilder();
     builder.setRead(readBuilder.build());
     return builder.build();

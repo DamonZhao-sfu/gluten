@@ -50,6 +50,7 @@ object GlutenClickHouseMetricsUTUtils {
     val resIter: GeneralOutIterator = transKernel.createKernelWithBatchIterator(
       mockMemoryAllocator.getNativeInstanceId,
       substraitPlan.toByteArray,
+      new Array[Array[Byte]](0),
       inBatchIters)
     val iter = new Iterator[Any] {
       private var outputRowCount = 0L
@@ -78,13 +79,6 @@ object GlutenClickHouseMetricsUTUtils {
     mockMemoryAllocator.close()
 
     nativeMetricsList.toSeq
-  }
-
-  def getTPCHQueryExecution(spark: SparkSession, queryNum: Int, tpchQueries: String): DataFrame = {
-    val sqlNum = "q" + "%02d".format(queryNum)
-    val sqlFile = tpchQueries + "/" + sqlNum + ".sql"
-    val sqlStr = Source.fromFile(new File(sqlFile), "UTF-8").mkString
-    spark.sql(sqlStr)
   }
 
   def getTPCDSQueryExecution(

@@ -18,7 +18,6 @@ package org.apache.spark.sql.execution
 
 import io.glutenproject.GlutenConfig
 import io.glutenproject.backendsapi.BackendsApiManager
-import io.glutenproject.backendsapi.velox.ValidatorApiImpl
 import io.glutenproject.columnarbatch.ColumnarBatches
 import io.glutenproject.exec.Runtimes
 import io.glutenproject.execution.{RowToVeloxColumnarExec, VeloxColumnarToRowExec}
@@ -27,6 +26,7 @@ import io.glutenproject.memory.nmm.NativeMemoryManagers
 import io.glutenproject.utils.{ArrowAbiUtil, Iterators}
 import io.glutenproject.vectorized.ColumnarBatchSerializerJniWrapper
 
+import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.{InternalRow, SQLConfHelper}
@@ -77,7 +77,7 @@ case class CachedColumnarBatch(
  *     -> Convert DefaultCachedBatch to InternalRow using vanilla Spark serializer
  */
 // spotless:on
-class ColumnarCachedBatchSerializer extends CachedBatchSerializer with SQLConfHelper {
+class ColumnarCachedBatchSerializer extends CachedBatchSerializer with SQLConfHelper with Logging {
   private lazy val rowBasedCachedBatchSerializer = new DefaultCachedBatchSerializer
 
   private def toStructType(schema: Seq[Attribute]): StructType = {
@@ -90,7 +90,13 @@ class ColumnarCachedBatchSerializer extends CachedBatchSerializer with SQLConfHe
   }
 
   private def validateSchema(schema: StructType): Boolean = {
-    new ValidatorApiImpl().doSchemaValidate(schema)
+    val reason = BackendsApiManager.getValidatorApiInstance.doSchemaValidate(schema)
+    if (reason.isDefined) {
+      logInfo(s"Columnar cache does not support schema $schema, due to ${reason.get}")
+      false
+    } else {
+      true
+    }
   }
 
   override def supportsColumnarInput(schema: Seq[Attribute]): Boolean = {
@@ -230,14 +236,15 @@ class ColumnarCachedBatchSerializer extends CachedBatchSerializer with SQLConfHe
     val timezoneId = SQLConf.get.sessionLocalTimeZone
     input.mapPartitions {
       it =>
+        val jniWrapper = ColumnarBatchSerializerJniWrapper
+          .create()
         val nmm = NativeMemoryManagers
           .contextInstance("ColumnarCachedBatchSerializer read")
         val schema = SparkArrowUtil.toArrowSchema(localSchema, timezoneId)
         val arrowAlloc = ArrowBufferAllocators.contextInstance()
         val cSchema = ArrowSchema.allocateNew(arrowAlloc)
         ArrowAbiUtil.exportSchema(arrowAlloc, schema, cSchema)
-        val deserializerHandle = ColumnarBatchSerializerJniWrapper
-          .create()
+        val deserializerHandle = jniWrapper
           .init(
             cSchema.memoryAddress(),
             nmm.getNativeInstanceHandle
@@ -251,8 +258,7 @@ class ColumnarCachedBatchSerializer extends CachedBatchSerializer with SQLConfHe
             override def next(): ColumnarBatch = {
               val cachedBatch = it.next().asInstanceOf[CachedColumnarBatch]
               val batchHandle =
-                ColumnarBatchSerializerJniWrapper
-                  .create()
+                jniWrapper
                   .deserialize(deserializerHandle, cachedBatch.bytes)
               val batch = ColumnarBatches.create(Runtimes.contextInstance(), batchHandle)
               if (shouldSelectAttributes) {
@@ -267,7 +273,7 @@ class ColumnarCachedBatchSerializer extends CachedBatchSerializer with SQLConfHe
             }
           })
           .recycleIterator {
-            ColumnarBatchSerializerJniWrapper.create().close(deserializerHandle)
+            jniWrapper.close(deserializerHandle)
           }
           .recyclePayload(_.close())
           .create()

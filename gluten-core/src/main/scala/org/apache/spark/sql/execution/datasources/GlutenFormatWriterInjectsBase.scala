@@ -18,13 +18,17 @@ package org.apache.spark.sql.execution.datasources
 
 import io.glutenproject.execution.{ProjectExecTransformer, SortExecTransformer, TransformSupport, WholeStageTransformer}
 import io.glutenproject.execution.datasource.GlutenFormatWriterInjects
-import io.glutenproject.extension.TransformPreOverrides
+import io.glutenproject.extension.ColumnarOverrideRules
 import io.glutenproject.extension.columnar.AddTransformHintRule
+import io.glutenproject.extension.columnar.MiscColumnarRules.TransformPreOverrides
 
 import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution.{ColumnarCollapseTransformStages, SparkPlan}
 import org.apache.spark.sql.execution.ColumnarCollapseTransformStages.transformStageCounter
+import org.apache.spark.sql.execution.datasources.GlutenWriterColumnarRules.NativeWritePostRule
 
 trait GlutenFormatWriterInjectsBase extends GlutenFormatWriterInjects {
 
@@ -41,7 +45,12 @@ trait GlutenFormatWriterInjectsBase extends GlutenFormatWriterInjects {
       return plan.execute()
     }
 
-    val transformed = TransformPreOverrides(false).apply(AddTransformHintRule().apply(plan))
+    val rules = List(
+      ColumnarOverrideRules.rewriteSparkPlanRule(),
+      AddTransformHintRule(),
+      TransformPreOverrides()
+    )
+    val transformed = rules.foldLeft(plan) { case (latestPlan, rule) => rule.apply(latestPlan) }
     if (!transformed.isInstanceOf[TransformSupport]) {
       throw new IllegalStateException(
         "Cannot transform the SparkPlans wrapped by FileFormatWriter, " +
@@ -65,5 +74,9 @@ trait GlutenFormatWriterInjectsBase extends GlutenFormatWriterInjects {
     val wst = WholeStageTransformer(transformedWithAdapter, materializeInput = true)(
       transformStageCounter.incrementAndGet())
     FakeRowAdaptor(wst).execute()
+  }
+
+  override def getExtendedColumnarPostRule(session: SparkSession): Rule[SparkPlan] = {
+    NativeWritePostRule(session)
   }
 }

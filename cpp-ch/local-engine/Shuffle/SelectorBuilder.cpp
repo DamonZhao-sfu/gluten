@@ -120,6 +120,7 @@ PartitionInfo HashSelectorBuilder::build(DB::Block & block)
     {
         if (hash_function_name == "sparkMurmurHash3_32")
         {
+            /// sparkMurmurHash3_32 returns are all not null.
             auto parts_num_int32 = static_cast<Int32>(parts_num);
             for (size_t i = 0; i < rows; i++)
             {
@@ -135,8 +136,21 @@ PartitionInfo HashSelectorBuilder::build(DB::Block & block)
         }
         else
         {
-            for (size_t i = 0; i < rows; i++)
-                partition_ids.emplace_back(static_cast<UInt64>(hash_column->get64(i) % parts_num));
+            if (hash_column->isNullable())
+            {
+                const auto * null_col = typeid_cast<const ColumnNullable *>(hash_column->getPtr().get());
+                auto & null_map = null_col->getNullMapData();
+                for (size_t i = 0; i < rows; ++i)
+                {
+                    auto hash_value = static_cast<UInt64>(hash_column->get64(i)) & static_cast<UInt64>(static_cast<Int64>(null_map[i]) - 1);
+                    partition_ids.emplace_back(static_cast<UInt64>(hash_value % parts_num));
+                }
+            }
+            else
+            {
+                for (size_t i = 0; i < rows; i++)
+                    partition_ids.emplace_back(static_cast<UInt64>(hash_column->get64(i) % parts_num));
+            }
         }
     }
     return PartitionInfo::fromSelector(std::move(partition_ids), parts_num);
@@ -167,7 +181,7 @@ void RangeSelectorBuilder::initSortInformation(Poco::JSON::Array::Ptr orderings)
     for (uint32_t i = 0; i < orderings->size(); ++i)
     {
         auto ordering = orderings->get(i).extract<Poco::JSON::Object::Ptr>();
-        auto col_pos = ordering->get("column_ref").convert<DB::Int32>();
+        auto col_pos = ordering->get("column_ref").convert<Int32>();
         auto col_name = ordering->get("column_name").convert<String>();
 
         auto sort_direction = ordering->get("direction").convert<int>();
@@ -238,31 +252,31 @@ void RangeSelectorBuilder::initRangeBlock(Poco::JSON::Array::Ptr range_bounds)
                 const auto & field_value = field_info->get("value");
                 if (type_name == "UInt8")
                 {
-                    col->insert(static_cast<DB::UInt8>(field_value.convert<DB::Int16>()));
+                    col->insert(static_cast<UInt8>(field_value.convert<Int16>()));
                 }
                 else if (type_name == "Int8")
                 {
-                    col->insert(field_value.convert<DB::Int8>());
+                    col->insert(field_value.convert<Poco::Int8>());
                 }
                 else if (type_name == "Int16")
                 {
-                    col->insert(field_value.convert<DB::Int16>());
+                    col->insert(field_value.convert<Int16>());
                 }
                 else if (type_name == "Int32")
                 {
-                    col->insert(field_value.convert<DB::Int32>());
+                    col->insert(field_value.convert<Int32>());
                 }
                 else if (type_name == "Int64")
                 {
-                    col->insert(field_value.convert<DB::Int64>());
+                    col->insert(field_value.convert<Int64>());
                 }
                 else if (type_name == "Float32")
                 {
-                    safeInsertFloatValue<DB::Float32>(field_value, col);
+                    safeInsertFloatValue<Float32>(field_value, col);
                 }
                 else if (type_name == "Float64")
                 {
-                    safeInsertFloatValue<DB::Float64>(field_value, col);
+                    safeInsertFloatValue<Float64>(field_value, col);
                 }
                 else if (type_name == "String")
                 {
@@ -270,7 +284,7 @@ void RangeSelectorBuilder::initRangeBlock(Poco::JSON::Array::Ptr range_bounds)
                 }
                 else if (type_name == "Date32")
                 {
-                    int val = field_value.convert<DB::Int32>();
+                    int val = field_value.convert<Int32>();
                     col->insert(val);
                 }
                 else if (const auto * decimal32 = dynamic_cast<const DB::DataTypeDecimal<DB::Decimal32> *>(type_info.inner_type.get()))

@@ -19,12 +19,12 @@ package io.glutenproject.execution
 import io.glutenproject.backendsapi.BackendsApiManager
 import io.glutenproject.extension.ValidationResult
 import io.glutenproject.metrics.MetricsUpdater
-import io.glutenproject.sql.shims.SparkShimLoader
 import io.glutenproject.substrait.rel.LocalFilesNode.ReadFileFormat
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
+import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.connector.catalog.Table
 import org.apache.spark.sql.connector.read.{InputPartition, Scan}
 import org.apache.spark.sql.execution.datasources.v2.{BatchScanExecShim, FileScan}
@@ -32,37 +32,83 @@ import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-import java.util.Objects
+/** Columnar Based BatchScanExec. */
+case class BatchScanExecTransformer(
+    override val output: Seq[AttributeReference],
+    @transient override val scan: Scan,
+    override val runtimeFilters: Seq[Expression],
+    override val keyGroupedPartitioning: Option[Seq[Expression]] = None,
+    override val ordering: Option[Seq[SortOrder]] = None,
+    @transient override val table: Table,
+    override val commonPartitionValues: Option[Seq[(InternalRow, Int)]] = None,
+    override val applyPartialClustering: Boolean = false,
+    override val replicatePartitions: Boolean = false)
+  extends BatchScanExecTransformerBase(
+    output,
+    scan,
+    runtimeFilters,
+    keyGroupedPartitioning,
+    ordering,
+    table,
+    commonPartitionValues,
+    applyPartialClustering,
+    replicatePartitions) {
 
-/**
- * Columnar Based BatchScanExec. Although keyGroupedPartitioning is not used, it cannot be deleted,
- * it can make BatchScanExecTransformer contain a constructor with the same parameters as
- * Spark-3.3's BatchScanExec. Otherwise, the corresponding constructor will not be found when
- * calling TreeNode.makeCopy and will fail to copy this node during transformation.
- */
-class BatchScanExecTransformer(
-    output: Seq[AttributeReference],
-    @transient scan: Scan,
-    runtimeFilters: Seq[Expression],
-    keyGroupedPartitioning: Option[Seq[Expression]] = None,
-    ordering: Option[Seq[SortOrder]] = None,
-    @transient table: Table,
-    commonPartitionValues: Option[Seq[(InternalRow, Int)]] = None,
-    applyPartialClustering: Boolean = false,
-    replicatePartitions: Boolean = false)
-  extends BatchScanExecShim(output, scan, runtimeFilters, table)
+  override def doCanonicalize(): BatchScanExecTransformer = {
+    this.copy(
+      output = output.map(QueryPlan.normalizeExpressions(_, output)),
+      runtimeFilters = QueryPlan.normalizePredicates(
+        runtimeFilters.filterNot(_ == DynamicPruningExpression(Literal.TrueLiteral)),
+        output)
+    )
+  }
+}
+
+abstract class BatchScanExecTransformerBase(
+    override val output: Seq[AttributeReference],
+    @transient override val scan: Scan,
+    override val runtimeFilters: Seq[Expression],
+    override val keyGroupedPartitioning: Option[Seq[Expression]] = None,
+    override val ordering: Option[Seq[SortOrder]] = None,
+    @transient override val table: Table,
+    override val commonPartitionValues: Option[Seq[(InternalRow, Int)]] = None,
+    override val applyPartialClustering: Boolean = false,
+    override val replicatePartitions: Boolean = false)
+  extends BatchScanExecShim(
+    output,
+    scan,
+    runtimeFilters,
+    keyGroupedPartitioning,
+    ordering,
+    table,
+    commonPartitionValues,
+    applyPartialClustering,
+    replicatePartitions)
   with BasicScanExecTransformer {
 
   // Note: "metrics" is made transient to avoid sending driver-side metrics to tasks.
   @transient override lazy val metrics: Map[String, SQLMetric] =
     BackendsApiManager.getMetricsApiInstance.genBatchScanTransformerMetrics(sparkContext)
 
+  // Similar to the problem encountered in https://github.com/oap-project/gluten/pull/3184,
+  // we cannot add member variables to BatchScanExecTransformerBase, which inherits from case
+  // class. Otherwise, we will encounter an issue where makeCopy cannot find a constructor
+  // with the corresponding number of parameters.
+  // The workaround is to add a mutable list to pass in pushdownFilters.
+  protected var pushdownFilters: Option[Seq[Expression]] = None
+
+  def setPushDownFilters(filters: Seq[Expression]): Unit = {
+    pushdownFilters = Some(filters)
+  }
+
   override def filterExprs(): Seq[Expression] = scan match {
     case fileScan: FileScan =>
-      fileScan.dataFilters
+      pushdownFilters.getOrElse(fileScan.dataFilters)
     case _ =>
       throw new UnsupportedOperationException(s"${scan.getClass.toString} is not supported")
   }
+
+  override def getMetadataColumns(): Seq[AttributeReference] = Seq.empty
 
   override def outputAttributes(): Seq[Attribute] = output
 
@@ -96,16 +142,6 @@ class BatchScanExecTransformer(
     doExecuteColumnarInternal()
   }
 
-  override def equals(other: Any): Boolean = other match {
-    case that: BatchScanExecTransformer =>
-      that.canEqual(this) && super.equals(that)
-    case _ => false
-  }
-
-  override def hashCode(): Int = Objects.hash(batch, runtimeFilters)
-
-  override def canEqual(other: Any): Boolean = other.isInstanceOf[BatchScanExecTransformer]
-
   override def metricsUpdater(): MetricsUpdater =
     BackendsApiManager.getMetricsApiInstance.genBatchScanTransformerMetricsUpdater(metrics)
 
@@ -118,15 +154,5 @@ class BatchScanExecTransformer(
     case "DwrfScan" => ReadFileFormat.DwrfReadFormat
     case "ClickHouseScan" => ReadFileFormat.MergeTreeReadFormat
     case _ => ReadFileFormat.UnknownFormat
-  }
-
-  override def doCanonicalize(): BatchScanExecTransformer = {
-    val canonicalized = super.doCanonicalize()
-    new BatchScanExecTransformer(
-      canonicalized.output,
-      canonicalized.scan,
-      canonicalized.runtimeFilters,
-      table = SparkShimLoader.getSparkShims.getBatchScanExecTable(canonicalized)
-    )
   }
 }

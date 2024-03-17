@@ -27,7 +27,10 @@ namespace gluten {
 class SubstraitToVeloxPlanValidator {
  public:
   SubstraitToVeloxPlanValidator(memory::MemoryPool* pool, core::ExecCtx* execCtx)
-      : pool_(pool), execCtx_(execCtx), planConverter_(pool_, confMap_, true) {}
+      : pool_(pool), execCtx_(execCtx), planConverter_(pool_, confMap_, std::nullopt, true) {}
+
+  /// Used to validate whether the computing of this Write is supported.
+  bool validate(const ::substrait::WriteRel& writeRel);
 
   /// Used to validate whether the computing of this Limit is supported.
   bool validate(const ::substrait::FetchRel& fetchRel);
@@ -55,6 +58,9 @@ class SubstraitToVeloxPlanValidator {
 
   /// Used to validate Join.
   bool validate(const ::substrait::JoinRel& joinRel);
+
+  /// Used to validate Cartesian product.
+  bool validate(const ::substrait::CrossRel& crossRel);
 
   /// Used to validate whether the computing of this Read is supported.
   bool validate(const ::substrait::ReadRel& readRel);
@@ -123,6 +129,11 @@ class SubstraitToVeloxPlanValidator {
 
   /// Validate Substrait if-then expression.
   bool validateIfThen(const ::substrait::Expression_IfThen& ifThen, const RowTypePtr& inputType);
+
+  /// Validate Substrait IN expression.
+  bool validateSingularOrList(
+      const ::substrait::Expression::SingularOrList& singularOrList,
+      const RowTypePtr& inputType);
 
   /// Add necessary log for fallback
   void logValidateMsg(const std::string& log) {

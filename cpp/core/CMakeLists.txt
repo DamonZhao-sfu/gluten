@@ -169,17 +169,6 @@ set(GLUTEN_PROTO_OUTPUT_FILES ${GLUTEN_PROTO_HDRS} ${GLUTEN_PROTO_SRCS})
 set_source_files_properties(${GLUTEN_PROTO_OUTPUT_FILES} PROPERTIES GENERATED TRUE)
 get_filename_component(GLUTEN_PROTO_DIR ${GLUTEN_PROTO_SRC_DIR}/ DIRECTORY)
 
-set(CODEGEN_HEADERS third_party/)
-set(THIRD_PARTY_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
-include_directories(${CMAKE_CURRENT_SOURCE_DIR} ${THIRD_PARTY_INCLUDE})
-file(MAKE_DIRECTORY ${root_directory}/releases/include)
-file(MAKE_DIRECTORY ${root_directory}/releases/include/codegen/common/)
-file(MAKE_DIRECTORY ${root_directory}/releases/include/codegen/third_party/)
-file(MAKE_DIRECTORY ${root_directory}/releases/include/codegen/precompile/)
-file(MAKE_DIRECTORY ${root_directory}/releases/include/codegen/utils/)
-file(MAKE_DIRECTORY ${root_directory}/releases/include/codegen/arrow_compute/ext/)
-file(COPY utils/metrics.h DESTINATION ${root_directory}/releases/include/common/)
-
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-declarations -Wno-attributes")
 set(SPARK_COLUMNAR_PLUGIN_SRCS
         ${SUBSTRAIT_PROTO_SRCS}
@@ -194,22 +183,22 @@ set(SPARK_COLUMNAR_PLUGIN_SRCS
         memory/ArrowMemoryPool.cc
         memory/ColumnarBatch.cc
         operators/writer/ArrowWriter.cc
-        shuffle/Options.cc
-        shuffle/ShuffleReader.cc
-        shuffle/ShuffleWriter.cc
-        shuffle/Partitioner.cc
         shuffle/FallbackRangePartitioner.cc
         shuffle/HashPartitioner.cc
-        shuffle/RoundRobinPartitioner.cc
-        shuffle/SinglePartitioner.cc
-        shuffle/Partitioning.cc
-        shuffle/PartitionWriterCreator.cc
         shuffle/LocalPartitionWriter.cc
+        shuffle/Options.cc
+        shuffle/Partitioner.cc
+        shuffle/Partitioning.cc
+        shuffle/Payload.cc
         shuffle/rss/RemotePartitionWriter.cc
         shuffle/rss/CelebornPartitionWriter.cc
+        shuffle/RoundRobinPartitioner.cc
+        shuffle/ShuffleMemoryPool.cc
+        shuffle/ShuffleReader.cc
+        shuffle/SinglePartitioner.cc
+        shuffle/Spill.cc
         shuffle/Utils.cc
         utils/Compression.cc
-        utils/DebugOut.cc
         utils/StringUtil.cc
         utils/ObjectStore.cc
         jni/JniError.cc
@@ -218,6 +207,13 @@ set(SPARK_COLUMNAR_PLUGIN_SRCS
 file(MAKE_DIRECTORY ${root_directory}/releases)
 add_library(gluten SHARED ${SPARK_COLUMNAR_PLUGIN_SRCS})
 add_dependencies(gluten jni_proto)
+
+if(ENABLE_GLUTEN_VCPKG)
+  # Hide symbols of some static dependencies. Otherwise, if such dependencies are already
+  # statically linked to libvelox.so, a runtime error will be reported: xxx is being linked
+  # both statically and dynamically.
+  target_link_options(gluten PRIVATE -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/symbols.map)
+endif()
 
 if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.0)
   execute_process(COMMAND ${CMAKE_C_COMPILER} -print-file-name=libstdc++fs.a
@@ -326,8 +322,14 @@ endif()
 
 target_link_libraries(gluten
     PUBLIC Arrow::arrow Arrow::parquet)
+target_link_libraries(gluten PRIVATE google::glog)
 
 install(TARGETS gluten
         DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/resources/libhdfs.so
         DESTINATION ${LIBHDFS3_DESTINATION})
+
+add_custom_command(TARGET gluten POST_BUILD COMMAND ld $<TARGET_FILE:gluten> || true
+        COMMENT "Checking ld result of libgluten.so")
+add_custom_command(TARGET gluten POST_BUILD COMMAND ldd $<TARGET_FILE:gluten> || true
+        COMMENT "Checking ldd result of libgluten.so")

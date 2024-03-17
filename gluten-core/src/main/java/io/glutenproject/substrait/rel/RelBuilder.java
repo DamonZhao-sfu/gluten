@@ -25,6 +25,7 @@ import io.glutenproject.substrait.extensions.AdvancedExtensionNode;
 import io.glutenproject.substrait.type.ColumnTypeNode;
 import io.glutenproject.substrait.type.TypeNode;
 
+import io.substrait.proto.CrossRel;
 import io.substrait.proto.JoinRel;
 import io.substrait.proto.SortField;
 import org.apache.spark.sql.catalyst.expressions.Attribute;
@@ -96,21 +97,13 @@ public class RelBuilder {
   public static RelNode makeReadRel(
       List<TypeNode> types,
       List<String> names,
-      ExpressionNode filter,
-      SubstraitContext context,
-      Long operatorId) {
-    return makeReadRel(types, names, null, filter, context, operatorId);
-  }
-
-  public static RelNode makeReadRel(
-      List<TypeNode> types,
-      List<String> names,
       List<ColumnTypeNode> columnTypeNodes,
       ExpressionNode filter,
+      AdvancedExtensionNode extensionNode,
       SubstraitContext context,
       Long operatorId) {
     context.registerRelToOperator(operatorId);
-    return new ReadRelNode(types, names, context, filter, columnTypeNodes);
+    return new ReadRelNode(types, names, filter, columnTypeNodes, extensionNode);
   }
 
   public static RelNode makeReadRelForInputIterator(
@@ -160,6 +153,18 @@ public class RelBuilder {
     return new JoinRelNode(left, right, joinType, expression, postJoinFilter, extensionNode);
   }
 
+  public static RelNode makeCrossRel(
+      RelNode left,
+      RelNode right,
+      CrossRel.JoinType joinType,
+      ExpressionNode expression,
+      AdvancedExtensionNode extensionNode,
+      SubstraitContext context,
+      Long operatorId) {
+    context.registerRelToOperator(operatorId);
+    return new CrossRelNode(left, right, joinType, expression, extensionNode);
+  }
+
   public static RelNode makeExpandRel(
       RelNode input,
       List<List<ExpressionNode>> projections,
@@ -177,6 +182,18 @@ public class RelBuilder {
       Long operatorId) {
     context.registerRelToOperator(operatorId);
     return new ExpandRelNode(input, projections);
+  }
+
+  public static RelNode makeWriteRel(
+      RelNode input,
+      List<TypeNode> types,
+      List<String> names,
+      List<ColumnTypeNode> columnTypeNodes,
+      AdvancedExtensionNode extensionNode,
+      SubstraitContext context,
+      Long operatorId) {
+    context.registerRelToOperator(operatorId);
+    return new WriteRelNode(input, types, names, columnTypeNodes, extensionNode);
   }
 
   public static RelNode makeSortRel(

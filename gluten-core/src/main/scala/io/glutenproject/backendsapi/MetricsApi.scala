@@ -87,6 +87,10 @@ trait MetricsApi extends Serializable {
 
   def genLimitTransformerMetricsUpdater(metrics: Map[String, SQLMetric]): MetricsUpdater
 
+  def genWriteFilesTransformerMetrics(sparkContext: SparkContext): Map[String, SQLMetric]
+
+  def genWriteFilesTransformerMetricsUpdater(metrics: Map[String, SQLMetric]): MetricsUpdater
+
   def genSortTransformerMetrics(sparkContext: SparkContext): Map[String, SQLMetric]
 
   def genSortTransformerMetricsUpdater(metrics: Map[String, SQLMetric]): MetricsUpdater
@@ -103,9 +107,9 @@ trait MetricsApi extends Serializable {
 
   def genHashJoinTransformerMetricsUpdater(metrics: Map[String, SQLMetric]): MetricsUpdater
 
-  def genGenerateTransformerMetrics(sparkContext: SparkContext): Map[String, SQLMetric]
+  def genNestedLoopJoinTransformerMetrics(sparkContext: SparkContext): Map[String, SQLMetric]
 
-  def genGenerateTransformerMetricsUpdater(metrics: Map[String, SQLMetric]): MetricsUpdater
+  def genNestedLoopJoinTransformerMetricsUpdater(metrics: Map[String, SQLMetric]): MetricsUpdater
 
   def genColumnarInMemoryTableMetrics(sparkContext: SparkContext): Map[String, SQLMetric] =
     Map("numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"))

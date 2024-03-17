@@ -17,7 +17,7 @@
 package io.glutenproject.execution
 
 import io.glutenproject.GlutenConfig
-import io.glutenproject.extension.InMemoryTableScanHelper
+import io.glutenproject.utils.PlanUtil
 
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.Row
@@ -57,8 +57,8 @@ class VeloxColumnarCacheSuite extends VeloxWholeStageTransformerSuite with Adapt
   }
 
   test("input columnar batch") {
-    TPCHTables.foreach {
-      case (table, _) =>
+    TPCHTables.map(_.name).foreach {
+      table =>
         runQueryAndCompare(s"SELECT * FROM $table", cache = true) {
           df => checkColumnarTableCache(df.queryExecution.executedPlan)
         }
@@ -134,8 +134,7 @@ class VeloxColumnarCacheSuite extends VeloxWholeStageTransformerSuite with Adapt
         checkAnswer(df, Row(60175))
         assert(
           find(df.queryExecution.executedPlan) {
-            case VeloxColumnarToRowExec(child: SparkPlan)
-                if InMemoryTableScanHelper.isGlutenTableCache(child) =>
+            case VeloxColumnarToRowExec(child: SparkPlan) if PlanUtil.isGlutenTableCache(child) =>
               true
             case _ => false
           }.isEmpty

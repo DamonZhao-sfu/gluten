@@ -21,6 +21,7 @@ import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight, BuildSide
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.execution.{FilterExec, SparkPlan}
 import org.apache.spark.sql.execution.aggregate.BaseAggregateExec
+import org.apache.spark.sql.execution.joins.BuildSideRelation
 
 import io.substrait.proto.JoinRel
 
@@ -118,7 +119,7 @@ case class ShuffledHashJoinExecTransformer(
   }
 
   override protected lazy val substraitJoinType: JoinRel.JoinType = joinType match {
-    case Inner =>
+    case _: InnerLike =>
       JoinRel.JoinType.JOIN_TYPE_INNER
     case FullOuter =>
       JoinRel.JoinType.JOIN_TYPE_OUTER
@@ -143,7 +144,6 @@ case class ShuffledHashJoinExecTransformer(
     case LeftAnti =>
       JoinRel.JoinType.JOIN_TYPE_ANTI
     case _ =>
-      // TODO: Support cross join with Cross Rel
       JoinRel.JoinType.UNRECOGNIZED
   }
 
@@ -153,7 +153,7 @@ case class ShuffledHashJoinExecTransformer(
     copy(left = newLeft, right = newRight)
 }
 
-case class GlutenBroadcastHashJoinExecTransformer(
+case class BroadcastHashJoinExecTransformer(
     leftKeys: Seq[Expression],
     rightKeys: Seq[Expression],
     joinType: JoinType,
@@ -162,7 +162,7 @@ case class GlutenBroadcastHashJoinExecTransformer(
     left: SparkPlan,
     right: SparkPlan,
     isNullAwareAntiJoin: Boolean)
-  extends BroadcastHashJoinExecTransformer(
+  extends BroadcastHashJoinExecTransformerBase(
     leftKeys,
     rightKeys,
     joinType,
@@ -173,7 +173,7 @@ case class GlutenBroadcastHashJoinExecTransformer(
     isNullAwareAntiJoin) {
 
   override protected lazy val substraitJoinType: JoinRel.JoinType = joinType match {
-    case Inner =>
+    case _: InnerLike =>
       JoinRel.JoinType.JOIN_TYPE_INNER
     case FullOuter =>
       JoinRel.JoinType.JOIN_TYPE_OUTER
@@ -193,6 +193,11 @@ case class GlutenBroadcastHashJoinExecTransformer(
 
   override protected def withNewChildrenInternal(
       newLeft: SparkPlan,
-      newRight: SparkPlan): GlutenBroadcastHashJoinExecTransformer =
+      newRight: SparkPlan): BroadcastHashJoinExecTransformer =
     copy(left = newLeft, right = newRight)
+
+  override protected def createBroadcastBuildSideRDD(): BroadcastBuildSideRDD = {
+    val broadcast = buildPlan.executeBroadcast[BuildSideRelation]()
+    VeloxBroadcastBuildSideRDD(sparkContext, broadcast)
+  }
 }

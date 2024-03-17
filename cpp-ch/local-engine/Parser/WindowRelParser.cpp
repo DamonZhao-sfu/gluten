@@ -115,9 +115,9 @@ WindowRelParser::parseWindowDescription(const WindowInfo & win_info)
 }
 
 /// In CH, it put all functions into one window description if they have the same partition expressions and sort fields.
-std::unordered_map<DB::String, WindowDescription> WindowRelParser::parseWindowDescriptions()
+std::unordered_map<String, WindowDescription> WindowRelParser::parseWindowDescriptions()
 {
-    std::unordered_map<DB::String, WindowDescription> window_descriptions;
+    std::unordered_map<String, WindowDescription> window_descriptions;
     for (size_t i = 0; i < win_infos.size(); ++i)
     {
         auto & win_info = win_infos[i];
@@ -357,7 +357,7 @@ void WindowRelParser::tryAddProjectionAfterWindow()
     {
         auto & win_info = win_infos[i];
         const auto * win_result_node = &actions_dag->findInOutputs(win_info.result_column_name);
-        win_info.function_parser->convertNodeTypeIfNeeded(win_info.parser_func_info, win_result_node, actions_dag);
+        win_info.function_parser->convertNodeTypeIfNeeded(win_info.parser_func_info, win_result_node, actions_dag, false);
     }
 
     if (actions_dag->dumpDAG() != dag_footprint)

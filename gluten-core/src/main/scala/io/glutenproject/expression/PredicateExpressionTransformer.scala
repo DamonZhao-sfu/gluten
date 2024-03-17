@@ -34,8 +34,9 @@ case class InTransformer(
     original: Expression)
   extends ExpressionTransformer {
   override def doTransform(args: java.lang.Object): ExpressionNode = {
+    assert(list.forall(_.foldable))
     // Stores the values in a List Literal.
-    val values: Set[Any] = list.map(_.asInstanceOf[Literal].value).toSet
+    val values: Set[Any] = list.map(_.eval()).toSet
     InExpressionTransformer.toTransformer(value.doTransform(args), values, valueType)
   }
 }
@@ -58,7 +59,9 @@ object InExpressionTransformer {
       values: Set[Any],
       valueType: DataType): ExpressionNode = {
     val expressionNodes = new java.util.ArrayList[ExpressionNode](
-      values
+      values.toSeq
+        // Sort elements for deterministic behaviours
+        .sortBy(Literal(_, valueType).toString())
         .map(value => ExpressionBuilder.makeLiteral(value, valueType, value == null))
         .asJava)
 

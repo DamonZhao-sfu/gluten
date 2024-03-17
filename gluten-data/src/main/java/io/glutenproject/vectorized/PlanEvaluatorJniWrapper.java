@@ -37,10 +37,6 @@ public class PlanEvaluatorJniWrapper implements RuntimeAware {
     return new PlanEvaluatorJniWrapper(Runtimes.contextInstance());
   }
 
-  public static PlanEvaluatorJniWrapper forRuntime(Runtime runtime) {
-    return new PlanEvaluatorJniWrapper(runtime);
-  }
-
   @Override
   public long handle() {
     return runtime.getHandle();
@@ -56,6 +52,8 @@ public class PlanEvaluatorJniWrapper implements RuntimeAware {
 
   public native String nativePlanString(byte[] substraitPlan, Boolean details);
 
+  public native void injectWriteFilesTempPath(byte[] path);
+
   /**
    * Create a native compute kernel and return a columnar result iterator.
    *
@@ -65,6 +63,7 @@ public class PlanEvaluatorJniWrapper implements RuntimeAware {
   public native long nativeCreateKernelWithIterator(
       long memoryManagerHandle,
       byte[] wsPlan,
+      byte[][] splitInfo,
       GeneralInIterator[] batchItr,
       int stageId,
       int partitionId,

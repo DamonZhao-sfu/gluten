@@ -40,15 +40,12 @@ class GlutenClickHouseTPCDSParquetSuite extends GlutenClickHouseTPCDSAbstractSui
       .set("spark.io.compression.codec", "snappy")
       .set("spark.sql.shuffle.partitions", "5")
       .set("spark.sql.autoBroadcastJoinThreshold", "10MB")
-      .set("spark.gluten.sql.columnar.backend.ch.use.v2", "false")
       // Currently, it can not support to read multiple partitioned file in one task.
       //      .set("spark.sql.files.maxPartitionBytes", "134217728")
       //      .set("spark.sql.files.openCostInBytes", "134217728")
       .set("spark.memory.offHeap.size", "4g")
       .set("spark.gluten.sql.validation.logLevel", "ERROR")
       .set("spark.gluten.sql.validation.printStackOnFailure", "true")
-//      .set("spark.gluten.sql.columnar.backend.ch.runtime_config.logger.level", "debug")
-//      .setMaster("local[1]")
   }
 
   executeTPCDSTest(false)
@@ -76,7 +73,7 @@ class GlutenClickHouseTPCDSParquetSuite extends GlutenClickHouseTPCDSAbstractSui
                           |  where ss_quantity between 1 and 20
                           |  and ss_sold_date_sk = 2452635
                           |""".stripMargin) { _ => }
-    assert(result(0).getDouble(0) == 379.21313271604936)
+    AlmostEqualsIsRel(379.21313271604936, result.head.getDouble(0), DBL_RELAX_EPSILON)
   }
 
   test("test select avg(int), avg(long)") {

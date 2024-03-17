@@ -98,7 +98,7 @@ object CHParquetReadBenchmark extends SqlBasedBenchmark with CHSqlBasedBenchmark
       .take(readFileCnt)
       .map(_.asInstanceOf[FilePartition])
 
-    val numOutputRows = chFileScan.longMetric("outputRows")
+    val numOutputRows = chFileScan.longMetric("numOutputRows")
     val numOutputVectors = chFileScan.longMetric("outputVectors")
     val scanTime = chFileScan.longMetric("scanTime")
     // Generate Substrait plan
@@ -110,12 +110,12 @@ object CHParquetReadBenchmark extends SqlBasedBenchmark with CHSqlBasedBenchmark
     }
     val planNode =
       PlanBuilder.makePlan(substraitContext, Lists.newArrayList(transformContext.root), outNames)
-    val fileFormat = ConverterUtils.getFileFormat(chFileScan)
 
     val nativeFileScanRDD = BackendsApiManager.getIteratorApiInstance.genNativeFileScanRDD(
       spark.sparkContext,
       WholeStageTransformContext(planNode, substraitContext),
       chFileScan.getSplitInfos,
+      chFileScan,
       numOutputRows,
       numOutputVectors,
       scanTime

@@ -43,13 +43,9 @@ public final class NativeMemoryManagers {
     if (!TaskResources.inSparkTask()) {
       throw new IllegalStateException("This method must be called in a Spark task.");
     }
+    String id = "NativeMemoryManager:" + name;
     return TaskResources.addResourceIfNotRegistered(
-        name, () -> createNativeMemoryManager(name, Collections.emptyList()));
-  }
-
-  /** Create a temporary memory manager, caller should call NativeMemoryManager#release manually. */
-  public static NativeMemoryManager tmpInstance(String name) {
-    return NativeMemoryManager.create(name, ReservationListener.NOOP);
+        id, () -> createNativeMemoryManager(name, Collections.emptyList()));
   }
 
   public static NativeMemoryManager create(String name, Spiller... spillers) {

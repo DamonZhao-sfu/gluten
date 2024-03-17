@@ -16,11 +16,13 @@
  */
 package io.glutenproject.execution
 
+import io.glutenproject.backendsapi.BackendsApiManager
 import io.glutenproject.execution.CHHashAggregateExecTransformer.getAggregateResultAttributes
 import io.glutenproject.expression._
-import io.glutenproject.substrait.`type`.TypeNode
+import io.glutenproject.substrait.`type`.{TypeBuilder, TypeNode}
 import io.glutenproject.substrait.{AggregationParams, SubstraitContext}
 import io.glutenproject.substrait.expression.{AggregateFunctionNode, ExpressionBuilder, ExpressionNode}
+import io.glutenproject.substrait.extensions.{AdvancedExtensionNode, ExtensionBuilder}
 import io.glutenproject.substrait.rel.{RelBuilder, RelNode}
 
 import org.apache.spark.sql.catalyst.expressions._
@@ -29,7 +31,12 @@ import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.aggregate.BaseAggregateExec
 import org.apache.spark.sql.types._
 
+import com.google.protobuf.{Any, StringValue}
+
 import java.util
+
+import scala.collection.JavaConverters._
+import scala.collection.mutable.ListBuffer
 
 object CHHashAggregateExecTransformer {
   def getAggregateResultAttributes(
@@ -68,14 +75,8 @@ case class CHHashAggregateExecTransformer(
 
   override protected def checkType(dataType: DataType): Boolean = {
     dataType match {
-      case BooleanType | ByteType | ShortType | IntegerType | LongType | FloatType | DoubleType |
-          StringType | TimestampType | DateType | BinaryType =>
-        true
       case _: StructType => true
-      case d: DecimalType => true
-      case a: ArrayType => true
-      case n: NullType => true
-      case other => false
+      case other => super.checkType(other)
     }
   }
 
@@ -108,8 +109,8 @@ case class CHHashAggregateExecTransformer(
       val typeList = new util.ArrayList[TypeNode]()
       val nameList = new util.ArrayList[String]()
       val (inputAttrs, outputAttrs) = {
-        if (modes.isEmpty) {
-          // When there is no aggregate function, it does not need
+        if (modes.isEmpty || modes.forall(_ == Complete)) {
+          // When there is no aggregate function or there is complete mode, it does not need
           // to handle outputs according to the AggregateMode
           for (attr <- child.output) {
             typeList.add(ConverterUtils.getTypeNode(attr.dataType, attr.nullable))
@@ -161,31 +162,13 @@ case class CHHashAggregateExecTransformer(
       aggParams: AggregationParams,
       input: RelNode = null,
       validation: Boolean = false): RelNode = {
-    val originalInputAttributes = child.output
-    val aggRel = if (needsPreProjection) {
-      aggParams.preProjectionNeeded = true
-      getAggRelWithPreProjection(context, originalInputAttributes, operatorId, input, validation)
-    } else {
-      getAggRelWithoutPreProjection(
-        context,
-        aggregateResultAttributes,
-        operatorId,
-        input,
-        validation)
-    }
-    // Will check if post-projection is needed. If yes, a ProjectRel will be added after the
-    // AggregateRel.
-    val resRel = if (!needsPostProjection(allAggregateResultAttributes)) {
-      aggRel
-    } else {
-      aggParams.postProjectionNeeded = true
-      applyPostProjection(context, aggRel, operatorId, validation)
-    }
+    val aggRel =
+      getAggRelInternal(context, aggregateResultAttributes, operatorId, input, validation)
     context.registerAggregationParam(operatorId, aggParams)
-    resRel
+    aggRel
   }
 
-  override def getAggRelWithoutPreProjection(
+  private def getAggRelInternal(
       context: SubstraitContext,
       originalInputAttributes: Seq[Attribute],
       operatorId: Long,
@@ -229,7 +212,7 @@ case class CHHashAggregateExecTransformer(
         val aggregateFunc = aggExpr.aggregateFunction
         val childrenNodeList = new util.ArrayList[ExpressionNode]()
         val childrenNodes = aggExpr.mode match {
-          case Partial =>
+          case Partial | Complete =>
             aggregateFunc.children.toList.map(
               expr => {
                 ExpressionConverter
@@ -375,6 +358,12 @@ case class CHHashAggregateExecTransformer(
               (makeStructType(fields), attr.nullable)
             case expr if "bloom_filter_agg".equals(expr.prettyName) =>
               (makeStructTypeSingleOne(expr.children.head.dataType, attr.nullable), attr.nullable)
+            case cd: CountDistinct =>
+              var fields = Seq[(DataType, Boolean)]()
+              for (child <- cd.children) {
+                fields = fields :+ (child.dataType, child.nullable)
+              }
+              (makeStructType(fields), false)
             case _ =>
               (makeStructTypeSingleOne(attr.dataType, attr.nullable), attr.nullable)
           }
@@ -388,5 +377,88 @@ case class CHHashAggregateExecTransformer(
   override protected def withNewChildInternal(
       newChild: SparkPlan): CHHashAggregateExecTransformer = {
     copy(child = newChild)
+  }
+
+  private def getAdvancedExtension(
+      validation: Boolean = false,
+      originalInputAttributes: Seq[Attribute] = Seq.empty): AdvancedExtensionNode = {
+    val enhancement = if (validation) {
+      // Use a extension node to send the input types through Substrait plan for validation.
+      val inputTypeNodeList = originalInputAttributes
+        .map(attr => ConverterUtils.getTypeNode(attr.dataType, attr.nullable))
+        .asJava
+      Any.pack(TypeBuilder.makeStruct(false, inputTypeNodeList).toProtobuf)
+    } else {
+      null
+    }
+    val optimizationContent = s"has_required_child_distribution_expressions=" +
+      s"${requiredChildDistributionExpressions.isDefined}\n"
+    val optimization =
+      BackendsApiManager.getTransformerApiInstance.packPBMessage(
+        StringValue.newBuilder.setValue(optimizationContent).build)
+    ExtensionBuilder.makeAdvancedExtension(optimization, enhancement)
+
+  }
+}
+
+case class CHHashAggregateExecPullOutHelper(
+    groupingExpressions: Seq[NamedExpression],
+    aggregateExpressions: Seq[AggregateExpression],
+    aggregateAttributes: Seq[Attribute])
+  extends HashAggregateExecPullOutBaseHelper(
+    groupingExpressions,
+    aggregateExpressions,
+    aggregateAttributes) {
+
+  /** This method calculates the output attributes of Aggregation. */
+  override protected def getAttrForAggregateExprs: List[Attribute] = {
+    val aggregateAttr = new ListBuffer[Attribute]()
+    val size = aggregateExpressions.size
+    var resIndex = 0
+    for (expIdx <- 0 until size) {
+      val exp: AggregateExpression = aggregateExpressions(expIdx)
+      resIndex = getAttrForAggregateExpr(exp, aggregateAttributes, aggregateAttr, resIndex)
+    }
+    aggregateAttr.toList
+  }
+
+  protected def getAttrForAggregateExpr(
+      exp: AggregateExpression,
+      aggregateAttributeList: Seq[Attribute],
+      aggregateAttr: ListBuffer[Attribute],
+      index: Int): Int = {
+    var resIndex = index
+    val aggregateFunc = exp.aggregateFunction
+    // First handle the custom aggregate functions
+    if (
+      ExpressionMappings.expressionExtensionTransformer.extensionExpressionsMapping.contains(
+        aggregateFunc.getClass)
+    ) {
+      ExpressionMappings.expressionExtensionTransformer
+        .getAttrsIndexForExtensionAggregateExpr(
+          aggregateFunc,
+          exp.mode,
+          exp,
+          aggregateAttributeList,
+          aggregateAttr,
+          index)
+    } else {
+      exp.mode match {
+        case Partial | PartialMerge =>
+          val aggBufferAttr = aggregateFunc.inputAggBufferAttributes
+          for (index <- aggBufferAttr.indices) {
+            val attr = ConverterUtils.getAttrFromExpr(aggBufferAttr(index))
+            aggregateAttr += attr
+          }
+          resIndex += aggBufferAttr.size
+          resIndex
+        case Final | Complete =>
+          aggregateAttr += aggregateAttributeList(resIndex)
+          resIndex += 1
+          resIndex
+        case other =>
+          throw new UnsupportedOperationException(s"Unsupported aggregate mode: $other.")
+      }
+    }
   }
 }

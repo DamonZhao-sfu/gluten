@@ -18,13 +18,15 @@
 #include "benchmarks/common/BenchmarkUtils.h"
 #include "compute/VeloxBackend.h"
 #include "compute/VeloxRuntime.h"
+#include "config/GlutenConfig.h"
 #include "memory/VeloxMemoryManager.h"
 #include "substrait/SubstraitToVeloxPlanValidator.h"
 
+using namespace facebook::velox;
 using namespace gluten;
 
 /// Set spark.gluten.sql.debug=true to get validation plan and dump it into a json file,
-/// then use this util debug validate process easilly in native side.
+/// then use this util debug validate process easily in native side.
 int main(int argc, char** argv) {
   if (argc != 2) {
     LOG(WARNING) << "PlanValidatorUtil usage: \n"
@@ -39,7 +41,11 @@ int main(int argc, char** argv) {
   std::string msgData = buffer.str();
   auto plan = substraitFromJsonToPb("Plan", msgData);
 
-  core::QueryCtx queryCtx;
+  std::unordered_map<std::string, std::string> conf;
+  conf.insert({kDebugModeEnabled, "true"});
+  initVeloxBackend(conf);
+  std::unordered_map<std::string, std::string> configs{{core::QueryConfig::kSparkPartitionId, "0"}};
+  core::QueryCtx queryCtx(nullptr, core::QueryConfig(configs));
   auto pool = defaultLeafVeloxMemoryPool().get();
   core::ExecCtx execCtx(pool, &queryCtx);
 

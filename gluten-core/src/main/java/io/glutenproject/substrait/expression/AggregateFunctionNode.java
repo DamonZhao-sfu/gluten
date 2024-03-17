@@ -57,11 +57,14 @@ public class AggregateFunctionNode implements Serializable {
         case "PARTIAL_MERGE":
           aggBuilder.setPhase(AggregationPhase.AGGREGATION_PHASE_INTERMEDIATE_TO_INTERMEDIATE);
           break;
+        case "COMPLETE":
+          aggBuilder.setPhase(AggregationPhase.AGGREGATION_PHASE_INITIAL_TO_RESULT);
+          break;
         case "FINAL":
           aggBuilder.setPhase(AggregationPhase.AGGREGATION_PHASE_INTERMEDIATE_TO_RESULT);
           break;
         default:
-          aggBuilder.setPhase(AggregationPhase.AGGREGATION_PHASE_UNSPECIFIED);
+          aggBuilder.setPhase(AggregationPhase.AGGREGATION_PHASE_INITIAL_TO_RESULT);
       }
     }
     for (ExpressionNode expressionNode : expressionNodes) {

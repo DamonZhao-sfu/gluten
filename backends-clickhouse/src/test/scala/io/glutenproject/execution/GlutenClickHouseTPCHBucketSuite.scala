@@ -17,12 +17,16 @@
 package io.glutenproject.execution
 
 import org.apache.spark.{SPARK_VERSION_SHORT, SparkConf}
+import org.apache.spark.sql.{DataFrame, Row}
 import org.apache.spark.sql.execution.InputIteratorTransformer
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
+import org.apache.spark.sql.execution.aggregate.SortAggregateExec
 
 import org.apache.commons.io.FileUtils
 
 import java.io.File
+
+import scala.collection.mutable
 
 // Some sqls' line length exceeds 100
 // scalastyle:off line.size.limit
@@ -32,12 +36,9 @@ class GlutenClickHouseTPCHBucketSuite
   with AdaptiveSparkPlanHelper {
 
   override protected val tablesPath: String = basePath + "/tpch-data-ch"
-  override protected val tpchQueries: String =
-    rootPath + "../../../../gluten-core/src/test/resources/tpch-queries"
+  override protected val tpchQueries: String = rootPath + "queries/tpch-queries-ch"
   override protected val queriesResults: String = rootPath + "bucket-queries-output"
 
-  protected val bucketTableResourcePath: String = rootPath + "tpch-data-bucket/mergetree_bucket"
-  protected val bucketTableDataPath: String = basePath + "/tpch-mergetree-bucket"
   protected lazy val sparkVersion: String = {
     val version = SPARK_VERSION_SHORT.split("\\.")
     version(0) + "." + version(1)
@@ -55,18 +56,26 @@ class GlutenClickHouseTPCHBucketSuite
 
   override protected val createNullableTables = true
 
-  override def beforeAll(): Unit = {
-    super.beforeAll()
-    FileUtils.copyDirectory(new File(bucketTableResourcePath), new File(bucketTableDataPath))
-    createTPCHMergeTreeBucketTables()
-  }
+  override protected def createTPCHNullableTables(): Unit = {
+    // create parquet data source table
+    val parquetSourceDB = "parquet_source"
+    spark.sql(s"""
+                 |CREATE DATABASE IF NOT EXISTS $parquetSourceDB
+                 |""".stripMargin)
+    spark.sql(s"use $parquetSourceDB")
 
-  protected def createTPCHMergeTreeBucketTables(): Unit = {
+    val parquetTablePath = basePath + "/tpch-data"
+    val parquetTableDataPath: String =
+      "../../../../gluten-core/src/test/resources/tpch-data"
+    FileUtils.copyDirectory(new File(rootPath + parquetTableDataPath), new File(parquetTablePath))
+
+    createNotNullTPCHTablesInParquet(parquetTablePath)
+
     spark.sql(s"""
                  |CREATE DATABASE IF NOT EXISTS tpch_mergetree_bucket
                  |""".stripMargin)
     spark.sql("use tpch_mergetree_bucket")
-    val customerData = bucketTableDataPath + "/customer"
+    val customerData = tablesPath + "/customer"
     spark.sql(s"DROP TABLE IF EXISTS customer")
     // On Spark 3.2, bucket table does not support to create bucket column with sort columns for
     // DS V2
@@ -86,7 +95,7 @@ class GlutenClickHouseTPCHBucketSuite
                  | ${if (sparkVersion.equals("3.2")) "" else "SORTED BY (c_custkey)"} INTO 2 BUCKETS;
                  |""".stripMargin)
 
-    val lineitemData = bucketTableDataPath + "/lineitem"
+    val lineitemData = tablesPath + "/lineitem"
     spark.sql(s"DROP TABLE IF EXISTS lineitem")
     spark.sql(
       s"""
@@ -113,7 +122,7 @@ class GlutenClickHouseTPCHBucketSuite
          | ${if (sparkVersion.equals("3.2")) "" else "SORTED BY (l_shipdate, l_orderkey)"} INTO 2 BUCKETS;
          |""".stripMargin)
 
-    val nationData = bucketTableDataPath + "/nation"
+    val nationData = tablesPath + "/nation"
     spark.sql(s"DROP TABLE IF EXISTS nation")
     spark.sql(
       s"""
@@ -128,7 +137,7 @@ class GlutenClickHouseTPCHBucketSuite
          | ${if (sparkVersion.equals("3.2")) "" else "SORTED BY (n_nationkey)"} INTO 1 BUCKETS;
          |""".stripMargin)
 
-    val regionData = bucketTableDataPath + "/region"
+    val regionData = tablesPath + "/region"
     spark.sql(s"DROP TABLE IF EXISTS region")
     spark.sql(
       s"""
@@ -142,7 +151,7 @@ class GlutenClickHouseTPCHBucketSuite
          | ${if (sparkVersion.equals("3.2")) "" else "SORTED BY (r_regionkey)"} INTO 1 BUCKETS;
          |""".stripMargin)
 
-    val ordersData = bucketTableDataPath + "/orders"
+    val ordersData = tablesPath + "/orders"
     spark.sql(s"DROP TABLE IF EXISTS orders")
     spark.sql(
       s"""
@@ -162,7 +171,7 @@ class GlutenClickHouseTPCHBucketSuite
          | ${if (sparkVersion.equals("3.2")) "" else "SORTED BY (o_orderkey, o_orderdate)"} INTO 2 BUCKETS;
          |""".stripMargin)
 
-    val partData = bucketTableDataPath + "/part"
+    val partData = tablesPath + "/part"
     spark.sql(s"DROP TABLE IF EXISTS part")
     spark.sql(s"""
                  | CREATE EXTERNAL TABLE IF NOT EXISTS part (
@@ -181,7 +190,7 @@ class GlutenClickHouseTPCHBucketSuite
                  | ${if (sparkVersion.equals("3.2")) "" else "SORTED BY (p_partkey)"} INTO 2 BUCKETS;
                  |""".stripMargin)
 
-    val partsuppData = bucketTableDataPath + "/partsupp"
+    val partsuppData = tablesPath + "/partsupp"
     spark.sql(s"DROP TABLE IF EXISTS partsupp")
     spark.sql(
       s"""
@@ -197,7 +206,7 @@ class GlutenClickHouseTPCHBucketSuite
          | ${if (sparkVersion.equals("3.2")) "" else "SORTED BY (ps_partkey)"} INTO 2 BUCKETS;
          |""".stripMargin)
 
-    val supplierData = bucketTableDataPath + "/supplier"
+    val supplierData = tablesPath + "/supplier"
     spark.sql(s"DROP TABLE IF EXISTS supplier")
     spark.sql(s"""
                  | CREATE EXTERNAL TABLE IF NOT EXISTS supplier (
@@ -220,6 +229,8 @@ class GlutenClickHouseTPCHBucketSuite
               |""".stripMargin)
       .collect()
     assert(result.length == 8)
+
+    insertIntoMergeTreeTPCHTables(parquetSourceDB)
   }
 
   test("TPCH Q1") {
@@ -229,9 +240,9 @@ class GlutenClickHouseTPCHBucketSuite
           case scanExec: BasicScanExecTransformer => scanExec
         }
         assert(!(plans(0).asInstanceOf[FileSourceScanExecTransformer].bucketedScan))
-        assert(plans(0).metrics("numFiles").value === 4)
+        assert(plans(0).metrics("numFiles").value === 2)
         assert(plans(0).metrics("pruningTime").value === -1)
-        assert(plans(0).metrics("outputRows").value === 591673)
+        assert(plans(0).metrics("numOutputRows").value === 591673)
       })
   }
 
@@ -290,7 +301,7 @@ class GlutenClickHouseTPCHBucketSuite
           assert(plans(11).asInstanceOf[FileSourceScanExecTransformer].bucketedScan)
         }
         assert(plans(11).metrics("numFiles").value === 1)
-        assert(plans(11).metrics("outputRows").value === 1000)
+        assert(plans(11).metrics("numOutputRows").value === 1000)
       })
   }
 
@@ -325,13 +336,30 @@ class GlutenClickHouseTPCHBucketSuite
         } else {
           assert(plans(2).asInstanceOf[FileSourceScanExecTransformer].bucketedScan)
         }
-        assert(plans(2).metrics("numFiles").value === 4)
-        assert(plans(2).metrics("outputRows").value === 3111)
+        assert(plans(2).metrics("numFiles").value === 2)
+        assert(plans(2).metrics("numOutputRows").value === 3111)
 
         assert(!(plans(3).asInstanceOf[FileSourceScanExecTransformer].bucketedScan))
-        assert(plans(3).metrics("numFiles").value === 4)
-        assert(plans(3).metrics("outputRows").value === 72678)
+        assert(plans(3).metrics("numFiles").value === 2)
+        assert(plans(3).metrics("numOutputRows").value === 72678)
       })
+
+    withSQLConf(
+      ("spark.sql.optimizer.runtime.bloomFilter.applicationSideScanSizeThreshold", "1KB"),
+      ("spark.sql.optimizer.runtime.bloomFilter.enabled", "true")) {
+      runTPCHQuery(3)(
+        df => {
+          if (sparkVersion.equals("3.3")) {
+            val plans = collectWithSubqueries(df.queryExecution.executedPlan) {
+              case aggExec: HashAggregateExecBaseTransformer
+                  if aggExec.aggregateExpressions.exists(
+                    _.aggregateFunction.getClass.getSimpleName.equals("BloomFilterAggregate")) =>
+                aggExec
+            }
+            assert(plans.size == 8)
+          }
+        })
+    }
   }
 
   test("TPCH Q4") {
@@ -354,13 +382,30 @@ class GlutenClickHouseTPCHBucketSuite
             .isInstanceOf[ProjectExecTransformer])
 
         assert(plans(1).asInstanceOf[FileSourceScanExecTransformer].bucketedScan)
-        assert(plans(1).metrics("numFiles").value === 4)
-        assert(plans(1).metrics("outputRows").value === 5552)
+        assert(plans(1).metrics("numFiles").value === 2)
+        assert(plans(1).metrics("numOutputRows").value === 5552)
 
         assert(plans(2).asInstanceOf[FileSourceScanExecTransformer].bucketedScan)
-        assert(plans(2).metrics("numFiles").value === 4)
-        assert(plans(2).metrics("outputRows").value === 379809)
+        assert(plans(2).metrics("numFiles").value === 2)
+        assert(plans(2).metrics("numOutputRows").value === 379809)
       })
+
+    withSQLConf(
+      ("spark.sql.optimizer.runtime.bloomFilter.applicationSideScanSizeThreshold", "1KB"),
+      ("spark.sql.optimizer.runtime.bloomFilter.enabled", "true")) {
+      runTPCHQuery(4)(
+        df => {
+          if (sparkVersion.equals("3.3")) {
+            val plans = collectWithSubqueries(df.queryExecution.executedPlan) {
+              case aggExec: HashAggregateExecBaseTransformer
+                  if aggExec.aggregateExpressions.exists(
+                    _.aggregateFunction.getClass.getSimpleName.equals("BloomFilterAggregate")) =>
+                aggExec
+            }
+            assert(plans.size == 4)
+          }
+        })
+    }
   }
 
   test("TPCH Q6") {
@@ -370,9 +415,9 @@ class GlutenClickHouseTPCHBucketSuite
           case scanExec: BasicScanExecTransformer => scanExec
         }
         assert(!(plans(0).asInstanceOf[FileSourceScanExecTransformer].bucketedScan))
-        assert(plans(0).metrics("numFiles").value === 4)
+        assert(plans(0).metrics("numFiles").value === 2)
         assert(plans(0).metrics("pruningTime").value === -1)
-        assert(plans(0).metrics("outputRows").value === 11618)
+        assert(plans(0).metrics("numOutputRows").value === 11618)
       })
   }
 
@@ -396,13 +441,30 @@ class GlutenClickHouseTPCHBucketSuite
             .isInstanceOf[ProjectExecTransformer])
 
         assert(plans(1).asInstanceOf[FileSourceScanExecTransformer].bucketedScan)
-        assert(plans(1).metrics("numFiles").value === 4)
-        assert(plans(1).metrics("outputRows").value === 150000)
+        assert(plans(1).metrics("numFiles").value === 2)
+        assert(plans(1).metrics("numOutputRows").value === 150000)
 
         assert(plans(2).asInstanceOf[FileSourceScanExecTransformer].bucketedScan)
-        assert(plans(2).metrics("numFiles").value === 4)
-        assert(plans(2).metrics("outputRows").value === 3155)
+        assert(plans(2).metrics("numFiles").value === 2)
+        assert(plans(2).metrics("numOutputRows").value === 3155)
       })
+
+    withSQLConf(
+      ("spark.sql.optimizer.runtime.bloomFilter.applicationSideScanSizeThreshold", "1KB"),
+      ("spark.sql.optimizer.runtime.bloomFilter.enabled", "true")) {
+      runTPCHQuery(12)(
+        df => {
+          if (sparkVersion.equals("3.3")) {
+            val plans = collectWithSubqueries(df.queryExecution.executedPlan) {
+              case aggExec: HashAggregateExecBaseTransformer
+                  if aggExec.aggregateExpressions.exists(
+                    _.aggregateFunction.getClass.getSimpleName.equals("BloomFilterAggregate")) =>
+                aggExec
+            }
+            assert(plans.size == 4)
+          }
+        })
+    }
   }
 
   test("TPCH Q18") {
@@ -483,6 +545,262 @@ class GlutenClickHouseTPCHBucketSuite
             .right
             .isInstanceOf[ProjectExecTransformer])
       })
+
+    withSQLConf(
+      ("spark.sql.optimizer.runtime.bloomFilter.applicationSideScanSizeThreshold", "1KB"),
+      ("spark.sql.optimizer.runtime.bloomFilter.enabled", "true")) {
+      runTPCHQuery(20)(
+        df => {
+          if (sparkVersion.equals("3.3")) {
+            val plans = collectWithSubqueries(df.queryExecution.executedPlan) {
+              case aggExec: HashAggregateExecBaseTransformer
+                  if aggExec.aggregateExpressions.exists(
+                    _.aggregateFunction.getClass.getSimpleName.equals("BloomFilterAggregate")) =>
+                aggExec
+            }
+            assert(plans.size == 6)
+          }
+        })
+    }
+  }
+
+  test("check bucket pruning on filter") {
+    // TODO use comparewithvanilla
+    val df = spark.sql("select count(*) from lineitem where l_orderkey = 12647")
+    val result = df.collect()
+    val scanExec = collect(df.queryExecution.executedPlan) {
+      case f: FileSourceScanExecTransformer => f
+    }
+    val touchedParts = scanExec.head.getPartitions
+      .flatMap(partition => partition.asInstanceOf[GlutenMergeTreePartition].partList)
+      .map(_.name)
+      .distinct
+    assert(touchedParts.size == 1)
+    assert(result.apply(0).apply(0) == 1)
+  }
+
+  test("GLUTEN-4668: Merge two phase hash-based aggregate into one aggregate") {
+    def checkHashAggregateCount(df: DataFrame, expectedCount: Int): Unit = {
+      val plans = collect(df.queryExecution.executedPlan) {
+        case agg: HashAggregateExecBaseTransformer => agg
+      }
+      assert(plans.size == expectedCount)
+    }
+
+    def checkResult(df: DataFrame, exceptedResult: Array[Row]): Unit = {
+      // check the result
+      val result = df.collect()
+      assert(result.size == exceptedResult.size)
+      result.equals(exceptedResult)
+    }
+
+    val SQL =
+      """
+        |select l_orderkey, l_returnflag, collect_list(l_linenumber) as t
+        |from lineitem group by l_orderkey, l_returnflag
+        |order by l_orderkey, l_returnflag, t limit 5
+        |""".stripMargin
+    runSql(SQL)(
+      df => {
+        checkResult(
+          df,
+          Array(
+            Row(1, "N", mutable.WrappedArray.make(Array(3, 6, 1, 5, 2, 4))),
+            Row(2, "N", mutable.WrappedArray.make(Array(1))),
+            Row(3, "A", mutable.WrappedArray.make(Array(6, 4, 3))),
+            Row(3, "R", mutable.WrappedArray.make(Array(2, 5, 1))),
+            Row(4, "N", mutable.WrappedArray.make(Array(1)))
+          )
+        )
+        checkHashAggregateCount(df, 1)
+      })
+
+    val SQL1 =
+      """
+        |select l_orderkey, l_returnflag,
+        |sum(l_linenumber) as t,
+        |count(l_linenumber) as t1,
+        |min(l_linenumber) as t2
+        |from lineitem group by l_orderkey, l_returnflag
+        |order by l_orderkey, l_returnflag, t, t1, t2 limit 5
+        |""".stripMargin
+    runSql(SQL1)(
+      df => {
+        checkResult(
+          df,
+          Array(
+            Row(1, "N", 21, 6, 1),
+            Row(2, "N", 1, 1, 1),
+            Row(3, "A", 13, 3, 3),
+            Row(3, "R", 8, 3, 1),
+            Row(4, "N", 1, 1, 1)
+          )
+        )
+        checkHashAggregateCount(df, 1)
+      })
+
+    val SQL2 =
+      """
+        |select l_returnflag, l_orderkey, collect_list(l_linenumber) as t
+        |from lineitem group by l_orderkey, l_returnflag
+        |order by l_returnflag, l_orderkey, t limit 5
+        |""".stripMargin
+    runSql(SQL2)(
+      df => {
+        checkResult(
+          df,
+          Array(
+            Row("A", 3, mutable.WrappedArray.make(Array(6, 4, 3))),
+            Row("A", 5, mutable.WrappedArray.make(Array(3))),
+            Row("A", 6, mutable.WrappedArray.make(Array(1))),
+            Row("A", 33, mutable.WrappedArray.make(Array(1, 2, 3))),
+            Row("A", 37, mutable.WrappedArray.make(Array(2, 3, 1)))
+          )
+        )
+        checkHashAggregateCount(df, 1)
+      })
+
+    // will merge four aggregates into two one.
+    val SQL3 =
+      """
+        |select l_returnflag, l_orderkey,
+        |count(distinct l_linenumber) as t
+        |from lineitem group by l_orderkey, l_returnflag
+        |order by l_returnflag, l_orderkey, t limit 5
+        |""".stripMargin
+    runSql(SQL3)(
+      df => {
+        checkResult(
+          df,
+          Array(
+            Row("A", 3, 3),
+            Row("A", 5, 1),
+            Row("A", 6, 1),
+            Row("A", 33, 3),
+            Row("A", 37, 3)
+          )
+        )
+        checkHashAggregateCount(df, 2)
+      })
+
+    // not support when there are more than one count distinct
+    val SQL4 =
+      """
+        |select l_returnflag, l_orderkey,
+        |count(distinct l_linenumber) as t,
+        |count(distinct l_discount) as t1
+        |from lineitem group by l_orderkey, l_returnflag
+        |order by l_returnflag, l_orderkey, t, t1 limit 5
+        |""".stripMargin
+    runSql(SQL4)(
+      df => {
+        checkResult(
+          df,
+          Array(
+            Row("A", 3, 3, 3),
+            Row("A", 5, 1, 1),
+            Row("A", 6, 1, 1),
+            Row("A", 33, 3, 3),
+            Row("A", 37, 3, 2)
+          )
+        )
+        checkHashAggregateCount(df, 4)
+      })
+
+    val SQL5 =
+      """
+        |select l_returnflag, l_orderkey,
+        |count(distinct l_linenumber) as t,
+        |sum(l_linenumber) as t1
+        |from lineitem group by l_orderkey, l_returnflag
+        |order by l_returnflag, l_orderkey, t, t1 limit 5
+        |""".stripMargin
+    runSql(SQL5)(
+      df => {
+        checkResult(
+          df,
+          Array(
+            Row("A", 3, 3, 13),
+            Row("A", 5, 1, 3),
+            Row("A", 6, 1, 1),
+            Row("A", 33, 3, 6),
+            Row("A", 37, 3, 6)
+          )
+        )
+        checkHashAggregateCount(df, 4)
+      })
+
+    val SQL6 =
+      """
+        |select count(1) from lineitem
+        |""".stripMargin
+    runSql(SQL6)(
+      df => {
+        checkResult(df, Array(Row(600572)))
+        // there is a shuffle between two phase hash aggregates.
+        checkHashAggregateCount(df, 2)
+      })
+
+    // test sort aggregates
+    val SQL7 =
+      """
+        |select l_orderkey, l_returnflag, max(l_shipinstruct) as t
+        |from lineitem
+        |group by l_orderkey, l_returnflag
+        |order by l_orderkey, l_returnflag, t
+        |limit 10
+        |""".stripMargin
+    runSql(SQL7)(
+      df => {
+        checkResult(
+          df,
+          Array(
+            Row(1, "N", "TAKE BACK RETURN"),
+            Row(2, "N", "TAKE BACK RETURN"),
+            Row(3, "A", "TAKE BACK RETURN"),
+            Row(3, "R", "TAKE BACK RETURN"),
+            Row(4, "N", "DELIVER IN PERSON"),
+            Row(5, "A", "DELIVER IN PERSON"),
+            Row(5, "R", "NONE"),
+            Row(6, "A", "TAKE BACK RETURN"),
+            Row(7, "N", "TAKE BACK RETURN"),
+            Row(32, "N", "TAKE BACK RETURN")
+          )
+        )
+        checkHashAggregateCount(df, 1)
+      })
+
+    withSQLConf(("spark.gluten.sql.columnar.force.hashagg", "false")) {
+      val SQL =
+        """
+          |select l_orderkey, l_returnflag, max(l_shipinstruct) as t
+          |from lineitem
+          |group by l_orderkey, l_returnflag
+          |order by l_orderkey, l_returnflag, t
+          |limit 10
+          |""".stripMargin
+      runSql(SQL7, false)(
+        df => {
+          checkResult(
+            df,
+            Array(
+              Row(1, "N", "TAKE BACK RETURN"),
+              Row(2, "N", "TAKE BACK RETURN"),
+              Row(3, "A", "TAKE BACK RETURN"),
+              Row(3, "R", "TAKE BACK RETURN"),
+              Row(4, "N", "DELIVER IN PERSON"),
+              Row(5, "A", "DELIVER IN PERSON"),
+              Row(5, "R", "NONE"),
+              Row(6, "A", "TAKE BACK RETURN"),
+              Row(7, "N", "TAKE BACK RETURN"),
+              Row(32, "N", "TAKE BACK RETURN")
+            )
+          )
+          checkHashAggregateCount(df, 0)
+          val plans = collect(df.queryExecution.executedPlan) { case agg: SortAggregateExec => agg }
+          assert(plans.size == 2)
+        })
+    }
   }
 }
 // scalastyle:off line.size.limit

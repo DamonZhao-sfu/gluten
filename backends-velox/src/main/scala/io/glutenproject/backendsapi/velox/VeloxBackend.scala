@@ -18,17 +18,23 @@ package io.glutenproject.backendsapi.velox
 
 import io.glutenproject.{GlutenConfig, GlutenPlugin, VELOX_BRANCH, VELOX_REVISION, VELOX_REVISION_TIME}
 import io.glutenproject.backendsapi._
+import io.glutenproject.execution.WriteFilesExecTransformer
 import io.glutenproject.expression.WindowFunctionsBuilder
+import io.glutenproject.extension.ValidationResult
+import io.glutenproject.sql.shims.SparkShimLoader
 import io.glutenproject.substrait.rel.LocalFilesNode.ReadFileFormat
 import io.glutenproject.substrait.rel.LocalFilesNode.ReadFileFormat.{DwrfReadFormat, OrcReadFormat, ParquetReadFormat}
 
-import org.apache.spark.sql.catalyst.expressions.{Alias, CumeDist, DenseRank, Descending, Expression, Literal, NamedExpression, NthValue, PercentRank, Rand, RangeFrame, Rank, RowNumber, SortOrder, SpecialFrameBoundary, SpecifiedWindowFrame}
+import org.apache.spark.sql.catalyst.catalog.BucketSpec
+import org.apache.spark.sql.catalyst.expressions.{Alias, CumeDist, DenseRank, Descending, Expression, Lag, Lead, Literal, NamedExpression, NthValue, NTile, PercentRank, Rand, RangeFrame, Rank, RowNumber, SortOrder, SpecialFrameBoundary, SpecifiedWindowFrame}
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, Count, Sum}
 import org.apache.spark.sql.catalyst.plans.JoinType
+import org.apache.spark.sql.catalyst.util.CharVarcharUtils
 import org.apache.spark.sql.execution.{ProjectExec, SparkPlan}
 import org.apache.spark.sql.execution.aggregate.HashAggregateExec
 import org.apache.spark.sql.execution.command.CreateDataSourceTableAsSelectCommand
-import org.apache.spark.sql.execution.datasources.InsertIntoHadoopFsRelationCommand
+import org.apache.spark.sql.execution.datasources.{FileFormat, InsertIntoHadoopFsRelationCommand}
+import org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat
 import org.apache.spark.sql.expression.UDFResolver
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
@@ -60,55 +66,189 @@ object BackendSettings extends BackendSettingsApi {
   val GLUTEN_VELOX_UDF_LIB_PATHS = getBackendConfigPrefix() + ".udfLibraryPaths"
   val GLUTEN_VELOX_DRIVER_UDF_LIB_PATHS = getBackendConfigPrefix() + ".driver.udfLibraryPaths"
 
+  val MAXIMUM_BATCH_SIZE: Int = 32768
+
   override def supportFileFormatRead(
       format: ReadFileFormat,
       fields: Array[StructField],
       partTable: Boolean,
-      paths: Seq[String]): Boolean = {
+      paths: Seq[String]): ValidationResult = {
     // Validate if all types are supported.
-    def validateTypes: Boolean = {
+    def validateTypes(validatorFunc: PartialFunction[StructField, String]): ValidationResult = {
       // Collect unsupported types.
-      val unsupportedDataTypes = fields.map(_.dataType).collect {
-        case _: ByteType => "ByteType"
-        // Parquet scan of nested array with struct/array as element type is not supported in Velox.
-        case arrayType: ArrayType if arrayType.elementType.isInstanceOf[StructType] =>
-          "StructType as element type in ArrayType"
-        case arrayType: ArrayType if arrayType.elementType.isInstanceOf[ArrayType] =>
-          "ArrayType as element type in ArrayType"
-        // Parquet scan of nested map with struct as key type,
-        // or array type as value type is not supported in Velox.
-        case mapType: MapType if mapType.keyType.isInstanceOf[StructType] =>
-          "StructType as Key type in MapType"
-        case mapType: MapType if mapType.valueType.isInstanceOf[ArrayType] =>
-          "ArrayType as Value type in MapType"
+      val unsupportedDataTypeReason = fields.collect(validatorFunc)
+      if (unsupportedDataTypeReason.isEmpty) {
+        ValidationResult.ok
+      } else {
+        ValidationResult.notOk(
+          s"Found unsupported data type in $format: ${unsupportedDataTypeReason.mkString(", ")}.")
       }
-      for (unsupportedDataType <- unsupportedDataTypes) {
-        // scalastyle:off println
-        println(
-          s"Validation failed for ${this.getClass.toString}" +
-            s" due to: data type $unsupportedDataType. in file schema. ")
-        // scalastyle:on println
-      }
-      unsupportedDataTypes.isEmpty
     }
 
+    val parquetTypeValidatorWithComplexTypeFallback: PartialFunction[StructField, String] = {
+      case StructField(_, arrayType: ArrayType, _, _) =>
+        arrayType.simpleString + " is forced to fallback."
+      case StructField(_, mapType: MapType, _, _) =>
+        mapType.simpleString + " is forced to fallback."
+      case StructField(_, structType: StructType, _, _) =>
+        structType.simpleString + " is forced to fallback."
+    }
+    val orcTypeValidatorWithComplexTypeFallback: PartialFunction[StructField, String] = {
+      case StructField(_, ByteType, _, _) => "ByteType not support"
+      case StructField(_, arrayType: ArrayType, _, _) =>
+        arrayType.simpleString + " is forced to fallback."
+      case StructField(_, mapType: MapType, _, _) =>
+        mapType.simpleString + " is forced to fallback."
+      case StructField(_, structType: StructType, _, _) =>
+        structType.simpleString + " is forced to fallback."
+      case StructField(_, stringType: StringType, _, metadata)
+          if CharVarcharUtils
+            .getRawTypeString(metadata)
+            .getOrElse(stringType.catalogString) != stringType.catalogString =>
+        CharVarcharUtils.getRawTypeString(metadata) + " not support"
+      case StructField(_, TimestampType, _, _) => "TimestampType not support"
+    }
     format match {
-      case ParquetReadFormat => validateTypes
-      case DwrfReadFormat => true
-      case OrcReadFormat =>
-        val unsupportedDataTypes =
-          fields.map(_.dataType).collect { case _: TimestampType => "TimestampType" }
-        for (unsupportedDataType <- unsupportedDataTypes) {
-          // scalastyle:off println
-          println(
-            s"Validation failed for ${this.getClass.toString}" +
-              s" due to: data type $unsupportedDataType. in file schema. ")
-          // scalastyle:on println
+      case ParquetReadFormat =>
+        val typeValidator: PartialFunction[StructField, String] = {
+          // Parquet scan of nested array with struct/array as element type is unsupported in Velox.
+          case StructField(_, arrayType: ArrayType, _, _)
+              if arrayType.elementType.isInstanceOf[StructType] =>
+            "StructType as element in ArrayType"
+          case StructField(_, arrayType: ArrayType, _, _)
+              if arrayType.elementType.isInstanceOf[ArrayType] =>
+            "ArrayType as element in ArrayType"
+          // Parquet scan of nested map with struct as key type,
+          // or array type as value type is not supported in Velox.
+          case StructField(_, mapType: MapType, _, _) if mapType.keyType.isInstanceOf[StructType] =>
+            "StructType as Key in MapType"
+          case StructField(_, mapType: MapType, _, _)
+              if mapType.valueType.isInstanceOf[ArrayType] =>
+            "ArrayType as Value in MapType"
         }
-        unsupportedDataTypes.isEmpty && validateTypes
-      case _ => false
+        if (!GlutenConfig.getConf.forceComplexTypeScanFallbackEnabled) {
+          validateTypes(typeValidator)
+        } else {
+          validateTypes(parquetTypeValidatorWithComplexTypeFallback)
+        }
+      case DwrfReadFormat => ValidationResult.ok
+      case OrcReadFormat =>
+        if (!GlutenConfig.getConf.veloxOrcScanEnabled) {
+          ValidationResult.notOk(s"Velox ORC scan is turned off.")
+        } else {
+          val typeValidator: PartialFunction[StructField, String] = {
+            case StructField(_, ByteType, _, _) => "ByteType not support"
+            case StructField(_, arrayType: ArrayType, _, _)
+                if arrayType.elementType.isInstanceOf[StructType] =>
+              "StructType as element in ArrayType"
+            case StructField(_, arrayType: ArrayType, _, _)
+                if arrayType.elementType.isInstanceOf[ArrayType] =>
+              "ArrayType as element in ArrayType"
+            case StructField(_, mapType: MapType, _, _)
+                if mapType.keyType.isInstanceOf[StructType] =>
+              "StructType as Key in MapType"
+            case StructField(_, mapType: MapType, _, _)
+                if mapType.valueType.isInstanceOf[ArrayType] =>
+              "ArrayType as Value in MapType"
+            case StructField(_, stringType: StringType, _, metadata)
+                if CharVarcharUtils
+                  .getRawTypeString(metadata)
+                  .getOrElse(stringType.catalogString) != stringType.catalogString =>
+              CharVarcharUtils.getRawTypeString(metadata) + " not support"
+            case StructField(_, TimestampType, _, _) => "TimestampType not support"
+          }
+          if (!GlutenConfig.getConf.forceComplexTypeScanFallbackEnabled) {
+            validateTypes(typeValidator)
+          } else {
+            validateTypes(orcTypeValidatorWithComplexTypeFallback)
+          }
+        }
+      case _ => ValidationResult.notOk(s"Unsupported file format for $format.")
     }
   }
+
+  override def supportWriteFilesExec(
+      format: FileFormat,
+      fields: Array[StructField],
+      bucketSpec: Option[BucketSpec],
+      options: Map[String, String]): ValidationResult = {
+
+    def validateCompressionCodec(): Option[String] = {
+      // Velox doesn't support brotli and lzo.
+      val unSupportedCompressions = Set("brotli, lzo")
+      val compressionCodec = WriteFilesExecTransformer.getCompressionCodec(options)
+      if (unSupportedCompressions.contains(compressionCodec)) {
+        Some("Brotli or lzo compression codec is unsupported in Velox backend.")
+      } else {
+        None
+      }
+    }
+
+    // Validate if all types are supported.
+    def validateDateTypes(): Option[String] = {
+      val unsupportedTypes = fields.flatMap {
+        field =>
+          field.dataType match {
+            case _: TimestampType => Some("TimestampType")
+            case _: StructType => Some("StructType")
+            case _: ArrayType => Some("ArrayType")
+            case _: MapType => Some("MapType")
+            case _ => None
+          }
+      }
+      if (unsupportedTypes.nonEmpty) {
+        Some(unsupportedTypes.mkString("Found unsupported type:", ",", ""))
+      } else {
+        None
+      }
+    }
+
+    def validateFieldMetadata(): Option[String] = {
+      fields.find(_.metadata != Metadata.empty).map {
+        filed =>
+          s"StructField contain the metadata information: $filed, metadata: ${filed.metadata}"
+      }
+    }
+
+    def validateFileFormat(): Option[String] = {
+      format match {
+        case _: ParquetFileFormat => None
+        case _: FileFormat => Some("Only parquet fileformat is supported in Velox backend.")
+      }
+    }
+
+    def validateWriteFilesOptions(): Option[String] = {
+      val maxRecordsPerFile = options
+        .get("maxRecordsPerFile")
+        .map(_.toLong)
+        .getOrElse(SQLConf.get.maxRecordsPerFile)
+      if (maxRecordsPerFile > 0) {
+        Some("Unsupported native write: maxRecordsPerFile not supported.")
+      } else {
+        None
+      }
+    }
+
+    def validateBucketSpec(): Option[String] = {
+      if (bucketSpec.nonEmpty) {
+        Some("Unsupported native write: bucket write is not supported.")
+      } else {
+        None
+      }
+    }
+
+    validateCompressionCodec()
+      .orElse(validateFileFormat())
+      .orElse(validateFieldMetadata())
+      .orElse(validateDateTypes())
+      .orElse(validateWriteFilesOptions())
+      .orElse(validateBucketSpec()) match {
+      case Some(reason) => ValidationResult.notOk(reason)
+      case _ => ValidationResult.ok
+    }
+  }
+
+  override def supportNativeMetadataColumns(): Boolean = true
 
   override def supportExpandExec(): Boolean = true
 
@@ -179,7 +319,7 @@ object BackendSettings extends BackendSettingsApi {
           }
           windowExpression.windowFunction match {
             case _: RowNumber | _: AggregateExpression | _: Rank | _: CumeDist | _: DenseRank |
-                _: PercentRank | _: NthValue =>
+                _: PercentRank | _: NthValue | _: NTile | _: Lag | _: Lead =>
             case _ =>
               allSupported = false
           }
@@ -275,7 +415,6 @@ object BackendSettings extends BackendSettingsApi {
   override def fallbackAggregateWithChild(): Boolean = true
 
   override def recreateJoinExecOnFallback(): Boolean = true
-  override def removeHashColumnFromColumnarShuffleExchangeExec(): Boolean = true
   override def rescaleDecimalLiteral(): Boolean = true
 
   /** Get the config prefix for each backend */
@@ -287,6 +426,7 @@ object BackendSettings extends BackendSettingsApi {
   override def shuffleSupportedCodec(): Set[String] = SHUFFLE_SUPPORTED_CODEC
 
   override def resolveNativeConf(nativeConf: java.util.Map[String, String]): Unit = {
+    checkMaxBatchSize(nativeConf)
     UDFResolver.resolveUdfConf(nativeConf)
   }
 
@@ -306,5 +446,42 @@ object BackendSettings extends BackendSettingsApi {
 
   override def staticPartitionWriteOnly(): Boolean = true
 
+  override def supportTransformWriteFiles: Boolean = true
+
   override def allowDecimalArithmetic: Boolean = SQLConf.get.decimalOperationsAllowPrecisionLoss
+
+  override def enableNativeWriteFiles(): Boolean = {
+    GlutenConfig.getConf.enableNativeWriter.getOrElse(
+      SparkShimLoader.getSparkShims.enableNativeWriteFilesByDefault()
+    )
+  }
+
+  private def checkMaxBatchSize(nativeConf: java.util.Map[String, String]): Unit = {
+    if (nativeConf.containsKey(GlutenConfig.GLUTEN_MAX_BATCH_SIZE_KEY)) {
+      val maxBatchSize = nativeConf.get(GlutenConfig.GLUTEN_MAX_BATCH_SIZE_KEY).toInt
+      if (maxBatchSize > MAXIMUM_BATCH_SIZE) {
+        throw new IllegalArgumentException(
+          s"The maximum value of ${GlutenConfig.GLUTEN_MAX_BATCH_SIZE_KEY}" +
+            s" is $MAXIMUM_BATCH_SIZE for Velox backend.")
+      }
+    }
+  }
+
+  override def shouldRewriteCount(): Boolean = {
+    // Velox backend does not support count if it has more that one child,
+    // so we should rewrite it.
+    true
+  }
+
+  override def supportCartesianProductExec(): Boolean = true
+
+  override def supportBroadcastNestedLoopJoinExec(): Boolean = true
+
+  override def shouldRewriteTypedImperativeAggregate(): Boolean = {
+    // The intermediate type of collect_list, collect_set in Velox backend is not consistent with
+    // vanilla Spark, we need to rewrite the aggregate to get the correct data type.
+    true
+  }
+
+  override def shouldRewriteCollect(): Boolean = true
 }

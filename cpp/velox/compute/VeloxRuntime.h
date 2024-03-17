@@ -35,7 +35,10 @@ class VeloxRuntime final : public Runtime {
  public:
   explicit VeloxRuntime(const std::unordered_map<std::string, std::string>& confMap);
 
-  void parsePlan(const uint8_t* data, int32_t size, SparkTaskInfo taskInfo) override;
+  void parsePlan(const uint8_t* data, int32_t size, SparkTaskInfo taskInfo, std::optional<std::string> dumpFile)
+      override;
+
+  void parseSplitInfo(const uint8_t* data, int32_t size, std::optional<std::string> dumpFile) override;
 
   static std::shared_ptr<facebook::velox::memory::MemoryPool> getAggregateVeloxPool(MemoryManager* memoryManager) {
     return toVeloxMemoryManager(memoryManager)->getAggregateMemoryPool();
@@ -82,8 +85,8 @@ class VeloxRuntime final : public Runtime {
 
   std::shared_ptr<ShuffleWriter> createShuffleWriter(
       int numPartitions,
-      std::shared_ptr<ShuffleWriter::PartitionWriterCreator> partitionWriterCreator,
-      const ShuffleWriterOptions& options,
+      std::unique_ptr<PartitionWriter> partitionWriter,
+      ShuffleWriterOptions options,
       MemoryManager* memoryManager) override;
 
   Metrics* getMetrics(ColumnarBatchIterator* rawIter, int64_t exportNanos) override {
@@ -109,8 +112,16 @@ class VeloxRuntime final : public Runtime {
 
   std::string planString(bool details, const std::unordered_map<std::string, std::string>& sessionConf) override;
 
+  void injectWriteFilesTempPath(const std::string& path) override;
+
+  void dumpConf(const std::string& path) override;
+
   std::shared_ptr<const facebook::velox::core::PlanNode> getVeloxPlan() {
     return veloxPlan_;
+  }
+
+  bool debugModeEnabled() const {
+    return debugModeEnabled_;
   }
 
   static void getInfoAndIds(
@@ -122,6 +133,8 @@ class VeloxRuntime final : public Runtime {
 
  private:
   std::shared_ptr<const facebook::velox::core::PlanNode> veloxPlan_;
+  std::shared_ptr<const facebook::velox::Config> veloxCfg_;
+  bool debugModeEnabled_{false};
 
   std::unordered_map<int32_t, std::shared_ptr<ColumnarBatch>> emptySchemaBatchLoopUp_;
 };

@@ -16,20 +16,20 @@
  */
 package org.apache.spark.sql.catalyst.expressions
 
-import org.apache.spark.sql.{GlutenTestConstants, GlutenTestsTrait}
+import org.apache.spark.sql.GlutenTestsTrait
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.codegen.GenerateUnsafeProjection
 import org.apache.spark.sql.catalyst.util.DateTimeTestUtils._
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.catalyst.util.DateTimeUtils.{getZoneId, TimeZoneUTC}
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.types.{DateType, IntegerType, StringType, TimestampType}
+import org.apache.spark.sql.types.{DateType, IntegerType, LongType, StringType, TimestampNTZType, TimestampType}
 import org.apache.spark.unsafe.types.UTF8String
 
 import java.sql.{Date, Timestamp}
 import java.text.SimpleDateFormat
-import java.time.ZoneId
-import java.util.{Locale, TimeZone}
+import java.time.{LocalDateTime, ZoneId}
+import java.util.{Calendar, Locale, TimeZone}
 
 import scala.concurrent.duration.MICROSECONDS
 
@@ -60,7 +60,7 @@ class GlutenDateExpressionsSuite extends DateExpressionsSuite with GlutenTestsTr
     // checkResult(Int.MinValue.toLong - 100)
   }
 
-  test(GlutenTestConstants.GLUTEN_TEST + "TIMESTAMP_MICROS") {
+  testGluten("TIMESTAMP_MICROS") {
     def testIntegralFunc(value: Number): Unit = {
       checkEvaluation(MicrosToTimestamp(Literal(value)), value.longValue())
     }
@@ -77,7 +77,7 @@ class GlutenDateExpressionsSuite extends DateExpressionsSuite with GlutenTestsTr
   }
 
   val outstandingTimezonesIds: Seq[String] = Seq(
-    // Velox doesn't support timezones like UTC.
+    // Velox doesn't support timezones like "UTC".
     // "UTC",
     PST.getId,
     CET.getId,
@@ -88,7 +88,7 @@ class GlutenDateExpressionsSuite extends DateExpressionsSuite with GlutenTestsTr
     "Europe/Brussels")
   val outstandingZoneIds: Seq[ZoneId] = outstandingTimezonesIds.map(getZoneId)
 
-  test(GlutenTestConstants.GLUTEN_TEST + "unix_timestamp") {
+  testGluten("unix_timestamp") {
     withDefaultTimeZone(UTC) {
       for (zid <- outstandingZoneIds) {
         Seq("legacy", "corrected").foreach {
@@ -189,7 +189,7 @@ class GlutenDateExpressionsSuite extends DateExpressionsSuite with GlutenTestsTr
       UnixTimestamp(Literal("2015-07-24"), Literal("\""), UTC_OPT) :: Nil)
   }
 
-  test(GlutenTestConstants.GLUTEN_TEST + "to_unix_timestamp") {
+  testGluten("to_unix_timestamp") {
     withDefaultTimeZone(UTC) {
       for (zid <- outstandingZoneIds) {
         Seq("legacy", "corrected").foreach {
@@ -287,7 +287,7 @@ class GlutenDateExpressionsSuite extends DateExpressionsSuite with GlutenTestsTr
   }
 
   // Modified based on vanilla spark to explicitly set timezone in config.
-  test(GlutenTestConstants.GLUTEN_TEST + "DateFormat") {
+  testGluten("DateFormat") {
     val PST_OPT = Option("America/Los_Angeles")
     val JST_OPT = Option("Asia/Tokyo")
 
@@ -341,6 +341,137 @@ class GlutenDateExpressionsSuite extends DateExpressionsSuite with GlutenTestsTr
             "0")
           checkEvaluation(DateFormatClass(Literal(ts), Literal("H"), JST_OPT), "22")
         }
+    }
+  }
+
+  testGluten("from_unixtime") {
+    val outstandingTimezonesIds: Seq[String] = Seq(
+      // Velox doesn't support timezones like "UTC".
+      // "UTC",
+      // Not supported in velox.
+      // PST.getId,
+      // CET.getId,
+      "Africa/Dakar",
+      LA.getId,
+      "Asia/Urumqi",
+      "Asia/Hong_Kong",
+      "Europe/Brussels"
+    )
+    val outstandingZoneIds: Seq[ZoneId] = outstandingTimezonesIds.map(getZoneId)
+    Seq("legacy", "corrected").foreach {
+      legacyParserPolicy =>
+        for (zid <- outstandingZoneIds) {
+          withSQLConf(
+            SQLConf.LEGACY_TIME_PARSER_POLICY.key -> legacyParserPolicy,
+            SQLConf.SESSION_LOCAL_TIMEZONE.key -> zid.getId) {
+            val fmt1 = "yyyy-MM-dd HH:mm:ss"
+            val sdf1 = new SimpleDateFormat(fmt1, Locale.US)
+            val fmt2 = "yyyy-MM-dd HH:mm:ss.SSS"
+            val sdf2 = new SimpleDateFormat(fmt2, Locale.US)
+            val timeZoneId = Option(zid.getId)
+            val tz = TimeZone.getTimeZone(zid)
+            sdf1.setTimeZone(tz)
+            sdf2.setTimeZone(tz)
+
+            checkEvaluation(
+              FromUnixTime(Literal(0L), Literal(fmt1), timeZoneId),
+              sdf1.format(new Timestamp(0)))
+            checkEvaluation(
+              FromUnixTime(Literal(1000L), Literal(fmt1), timeZoneId),
+              sdf1.format(new Timestamp(1000000)))
+            checkEvaluation(
+              FromUnixTime(Literal(-1000L), Literal(fmt2), timeZoneId),
+              sdf2.format(new Timestamp(-1000000)))
+            checkEvaluation(
+              FromUnixTime(
+                Literal.create(null, LongType),
+                Literal.create(null, StringType),
+                timeZoneId),
+              null)
+            checkEvaluation(
+              FromUnixTime(Literal.create(null, LongType), Literal(fmt1), timeZoneId),
+              null)
+            checkEvaluation(
+              FromUnixTime(Literal(1000L), Literal.create(null, StringType), timeZoneId),
+              null)
+
+            // SPARK-28072 The codegen path for non-literal input should also work
+            checkEvaluation(
+              expression = FromUnixTime(
+                BoundReference(ordinal = 0, dataType = LongType, nullable = true),
+                BoundReference(ordinal = 1, dataType = StringType, nullable = true),
+                timeZoneId),
+              expected = UTF8String.fromString(sdf1.format(new Timestamp(0))),
+              inputRow = InternalRow(0L, UTF8String.fromString(fmt1))
+            )
+          }
+        }
+    }
+    // Test escaping of format
+    GenerateUnsafeProjection.generate(FromUnixTime(Literal(0L), Literal("\""), UTC_OPT) :: Nil)
+  }
+
+  testGluten("Hour") {
+    val outstandingTimezonesIds: Seq[String] = Seq(
+      // Velox doesn't support timezones like "UTC".
+      // "UTC",
+      // Due to known issue: "-08:00/+01:00 not found in timezone database",
+      // skip check PST, CET timezone here.
+      // https://github.com/facebookincubator/velox/issues/7804
+      // PST.getId, CET.getId,
+      "Africa/Dakar",
+      LA.getId,
+      "Asia/Urumqi",
+      "Asia/Hong_Kong",
+      "Europe/Brussels"
+    )
+    withDefaultTimeZone(UTC) {
+      Seq("legacy", "corrected").foreach {
+        legacyParserPolicy =>
+          withSQLConf(
+            SQLConf.LEGACY_TIME_PARSER_POLICY.key -> legacyParserPolicy,
+            SQLConf.SESSION_LOCAL_TIMEZONE.key -> UTC_OPT.get
+          ) {
+            assert(Hour(Literal.create(null, DateType), UTC_OPT).resolved === false)
+            assert(Hour(Literal(ts), UTC_OPT).resolved)
+            Seq(TimestampType, TimestampNTZType).foreach {
+              dt =>
+                checkEvaluation(Hour(Cast(Literal(d), dt, UTC_OPT), UTC_OPT), 0)
+                checkEvaluation(Hour(Cast(Literal(date), dt, UTC_OPT), UTC_OPT), 13)
+            }
+            checkEvaluation(Hour(Literal(ts), UTC_OPT), 13)
+          }
+
+          val c = Calendar.getInstance()
+          outstandingTimezonesIds.foreach {
+            zid =>
+              withSQLConf(
+                SQLConf.LEGACY_TIME_PARSER_POLICY.key -> legacyParserPolicy,
+                SQLConf.SESSION_LOCAL_TIMEZONE.key -> zid
+              ) {
+                val timeZoneId = Option(zid)
+                c.setTimeZone(TimeZone.getTimeZone(zid))
+                (0 to 24 by 5).foreach {
+                  h =>
+                    // validate timestamp with local time zone
+                    c.set(2015, 18, 3, h, 29, 59)
+                    checkEvaluation(
+                      Hour(Literal(new Timestamp(c.getTimeInMillis)), timeZoneId),
+                      c.get(Calendar.HOUR_OF_DAY))
+
+                    // validate timestamp without time zone
+                    val localDateTime = LocalDateTime.of(2015, 1, 3, h, 29, 59)
+                    checkEvaluation(Hour(Literal(localDateTime), timeZoneId), h)
+                }
+                Seq(TimestampType, TimestampNTZType).foreach {
+                  dt =>
+                    checkConsistencyBetweenInterpretedAndCodegen(
+                      (child: Expression) => Hour(child, timeZoneId),
+                      dt)
+                }
+              }
+          }
+      }
     }
   }
 }

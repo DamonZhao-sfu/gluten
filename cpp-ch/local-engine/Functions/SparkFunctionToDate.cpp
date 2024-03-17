@@ -22,6 +22,7 @@
 #include <Functions/FunctionFactory.h>
 #include <IO/ReadBufferFromMemory.h>
 #include <IO/ReadHelpers.h>
+#include <IO/parseDateTimeBestEffort.h>
 
 namespace DB
 {
@@ -37,20 +38,22 @@ namespace local_engine
 class SparkFunctionConvertToDate : public DB::FunctionToDate32OrNull
 {
 public:
-    static constexpr auto name = "spark_to_date";
+    static constexpr auto name = "sparkToDate";
     static DB::FunctionPtr create(DB::ContextPtr) { return std::make_shared<SparkFunctionConvertToDate>(); }
     SparkFunctionConvertToDate() = default;
     ~SparkFunctionConvertToDate() override = default;
-    DB::String getName() const override { return name; }
+    String getName() const override { return name; }
 
-    bool checkDateFormat(DB::ReadBuffer & buf) const
+    bool checkAndGetDate32(DB::ReadBuffer & buf, DB::DataTypeDate32::FieldType &x, const DateLUTImpl & date_lut) const
     {
         auto checkNumbericASCII = [&](DB::ReadBuffer & rb, size_t start, size_t length) -> bool
         {
             for (size_t i = start; i < start + length; ++i)
             {
                 if (!isNumericASCII(*(rb.position() + i)))
+                {
                     return false;
+                }
             }
             return true;
         };
@@ -63,16 +66,16 @@ public:
         };
         if (!checkNumbericASCII(buf, 0, 4) 
             || !checkDelimiter(buf, 4) 
-            || !checkNumbericASCII(buf, 5, 2) 
+            || !checkNumbericASCII(buf, 5, 2)
             || !checkDelimiter(buf, 7) 
             || !checkNumbericASCII(buf, 8, 2))
             return false;
         else
         {
-            int month = (*(buf.position() + 5) - '0') * 10 + (*(buf.position() + 6) - '0');
+            UInt8 month = (*(buf.position() + 5) - '0') * 10 + (*(buf.position() + 6) - '0');
             if (month <= 0 || month > 12)
                 return false;
-            int day = (*(buf.position() + 8) - '0') * 10 + (*(buf.position() + 9) - '0');
+            UInt8 day = (*(buf.position() + 8) - '0') * 10 + (*(buf.position() + 9) - '0');
             if (day <= 0 || day > 31)
                 return false;
             else if (day == 31 && (month == 2 || month == 4 || month == 6 || month == 9 || month == 11))
@@ -81,14 +84,17 @@ public:
                 return false;
             else
             {
-                int year = (*(buf.position() + 0) - '0') * 1000 + 
+                Int16 year = (*(buf.position() + 0) - '0') * 1000 + 
                     (*(buf.position() + 1) - '0') * 100 + 
                     (*(buf.position() + 2) - '0') * 10 + 
                     (*(buf.position() + 3) - '0');
                 if (day == 29 && month == 2 && year % 4 != 0)
                     return false;
                 else
+                {
+                    x = date_lut.makeDayNum(year, month, day, -static_cast<Int32>(date_lut.getDayNumOffsetEpoch()));
                     return true;
+                }
             }
         }
     }
@@ -106,22 +112,22 @@ public:
             throw DB::Exception(DB::ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT, "Function {}'s return type must be nullable", name);
         
         if (!isDate32(removeNullable(result_type)))
-            throw DB::Exception(DB::ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT, "Function {}'s return type must be data32.", name);
+            throw DB::Exception(DB::ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT, "Function {}'s return type must be date32.", name);
         
         using ColVecTo = DB::DataTypeDate32::ColumnType;
-        typename ColVecTo::MutablePtr result_column = ColVecTo::create(size);
+        typename ColVecTo::MutablePtr result_column = ColVecTo::create(size, 0);
         typename ColVecTo::Container & result_container = result_column->getData();
-        DB::ColumnUInt8::MutablePtr null_map = DB::ColumnUInt8::create(size);
+        DB::ColumnUInt8::MutablePtr null_map = DB::ColumnUInt8::create(size, 0);
         typename DB::ColumnUInt8::Container & null_container = null_map->getData();
+        const DateLUTImpl * local_time_zone = &DateLUT::instance();
         const DateLUTImpl * utc_time_zone = &DateLUT::instance("UTC");
 
         for (size_t i = 0; i < size; ++i)
         {
             auto str = src_col->getDataAt(i);
-            if (str.size < 10)
+            if (str.size < 4)
             {
                 null_container[i] = true;
-                result_container[i] = 0;
                 continue;
             }
             else
@@ -131,20 +137,16 @@ public:
                 {
                     buf.position() ++;
                 }
-                if(buf.buffer().end() - buf.position() < 10)
+                if(buf.buffer().end() - buf.position() < 4)
                 {
                     null_container[i] = true;
-                    result_container[i] = 0;
                     continue;
                 }
-                if (!checkDateFormat(buf))
+                if (!checkAndGetDate32(buf, result_container[i], *local_time_zone))
                 {
-                    null_container[i] = true;
-                    result_container[i] = 0;
-                }
-                else
-                {
-                    bool parsed = tryParseImpl<DB::DataTypeDate32>(result_container[i], buf, utc_time_zone, false);
+                    time_t tmp = 0;
+                    bool parsed = tryParseDateTimeBestEffort(tmp, buf, *local_time_zone, *utc_time_zone);
+                    result_container[i] = local_time_zone->toDayNum<time_t>(tmp);
                     null_container[i] = !parsed;
                 }
             }

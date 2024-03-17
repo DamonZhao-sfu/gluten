@@ -19,8 +19,8 @@ package io.glutenproject.execution
 import io.glutenproject.GlutenConfig
 import io.glutenproject.utils.UTSystemParameters
 
-import org.apache.spark.SparkConf
-import org.apache.spark.sql.Row
+import org.apache.spark.{SPARK_VERSION_SHORT, SparkConf}
+import org.apache.spark.sql.{DataFrame, Row}
 import org.apache.spark.sql.catalyst.optimizer.{ConstantFolding, NullPropagation}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
@@ -28,23 +28,19 @@ import org.apache.spark.sql.types._
 import java.nio.file.Files
 import java.sql.Date
 
-import scala.collection.immutable.Seq
+import scala.reflect.ClassTag
 
 class GlutenFunctionValidateSuite extends GlutenClickHouseWholeStageTransformerSuite {
-  override protected val resourcePath: String = {
-    "../../../../gluten-core/src/test/resources/tpch-data"
+
+  protected lazy val sparkVersion: String = {
+    val version = SPARK_VERSION_SHORT.split("\\.")
+    version(0) + "." + version(1)
   }
-  override protected val backend: String = "ch"
-  override protected val fileFormat: String = "parquet"
-  protected val rootPath: String = getClass.getResource("/").getPath
-  protected val basePath: String = rootPath + "unit-tests-working-home"
 
   protected val tablesPath: String = basePath + "/tpch-data"
   protected val tpchQueries: String =
     rootPath + "../../../../gluten-core/src/test/resources/tpch-queries"
   protected val queriesResults: String = rootPath + "queries-output"
-  protected val warehouse: String = basePath + "/spark-warehouse"
-  protected val metaStorePathAbsolute: String = basePath + "/meta"
 
   private var parquetPath: String = _
 
@@ -73,7 +69,6 @@ class GlutenFunctionValidateSuite extends GlutenClickHouseWholeStageTransformerS
       .set("spark.io.compression.codec", "snappy")
       .set("spark.sql.shuffle.partitions", "5")
       .set("spark.sql.autoBroadcastJoinThreshold", "10MB")
-      .set("spark.gluten.sql.columnar.backend.ch.use.v2", "false")
   }
 
   override def beforeAll(): Unit = {
@@ -326,6 +321,22 @@ class GlutenFunctionValidateSuite extends GlutenClickHouseWholeStageTransformerS
     checkLengthAndPlan(df2, 10)
   }
 
+  test("test function xxhash64 with complex types") {
+    val sql =
+      """
+        |select
+        |  xxhash64(array(id, null, id+1, 100)),
+        |  xxhash64(array(cast(id as string), null, 'spark')),
+        |  xxhash64(array(null)),
+        |  xxhash64(cast(null as array<int>)),
+        |  xxhash64(array(array(id, null, id+1))),
+        |  xxhash64(cast(null as struct<a:int, b:string>)),
+        |  xxhash64(struct(id, cast(id as string), 100, 'spark', null))
+        |from range(10);
+      """.stripMargin
+    runQueryAndCompare(sql)(checkOperatorMatch[ProjectExecTransformer])
+  }
+
   test("test 'function murmur3hash'") {
     val df1 = runQueryAndCompare(
       "select hash(cast(id as int)), hash(cast(id as byte)), hash(cast(id as short)), " +
@@ -348,6 +359,22 @@ class GlutenFunctionValidateSuite extends GlutenClickHouseWholeStageTransformerS
         "hash(cast(id as decimal(30, 2)), 'spark') from range(10)"
     )(checkOperatorMatch[ProjectExecTransformer])
     checkLengthAndPlan(df2, 10)
+  }
+
+  test("test function murmur3hash with complex types") {
+    val sql =
+      """
+        |select
+        |  hash(array(id, null, id+1, 100)),
+        |  hash(array(cast(id as string), null, 'spark')),
+        |  hash(array(null)),
+        |  hash(cast(null as array<int>)),
+        |  hash(array(array(id, null, id+1))),
+        |  hash(cast(null as struct<a:int, b:string>)),
+        |  hash(struct(id, cast(id as string), 100, 'spark', null))
+        |from range(10);
+      """.stripMargin
+    runQueryAndCompare(sql)(checkOperatorMatch[ProjectExecTransformer])
   }
 
   test("test next_day const") {
@@ -498,6 +525,13 @@ class GlutenFunctionValidateSuite extends GlutenClickHouseWholeStageTransformerS
     runQueryAndCompare(
       "select * from date_table where to_date(from_unixtime(ts)) = '2019-01-01'",
       noFallBack = true) { _ => }
+    runQueryAndCompare(
+      "select * from date_table where from_unixtime(ts) between '2019-01-01' and '2019-01-02'",
+      noFallBack = true) { _ => }
+    runQueryAndCompare(
+      "select * from date_table where from_unixtime(ts, 'yyyy-MM-dd') between" +
+        " '2019-01-01' and '2019-01-02'",
+      noFallBack = true) { _ => }
   }
 
   test("test element_at function") {
@@ -526,5 +560,77 @@ class GlutenFunctionValidateSuite extends GlutenClickHouseWholeStageTransformerS
         noFallBack = true
       )(checkOperatorMatch[ProjectExecTransformer])
     }
+  }
+
+  test("test common subexpression eliminate") {
+    def checkOperatorCount[T <: TransformSupport](count: Int)(df: DataFrame)(implicit
+        tag: ClassTag[T]): Unit = {
+      if (sparkVersion.equals("3.3")) {
+        assert(
+          getExecutedPlan(df).count(
+            plan => {
+              plan.getClass == tag.runtimeClass
+            }) == count,
+          s"executed plan: ${getExecutedPlan(df)}")
+      }
+    }
+
+    withSQLConf(("spark.gluten.sql.commonSubexpressionEliminate", "true")) {
+      // CSE in project
+      runQueryAndCompare("select hash(id), hash(id)+1, hash(id)-1 from range(10)") {
+        df => checkOperatorCount[ProjectExecTransformer](2)(df)
+      }
+
+      // CSE in filter(not work yet)
+      // runQueryAndCompare(
+      //   "select id from range(10) " +
+      //     "where hex(id) != '' and upper(hex(id)) != '' and lower(hex(id)) != ''") { _ => }
+
+      // CSE in window
+      runQueryAndCompare(
+        "SELECT id, AVG(id) OVER (PARTITION BY id % 2 ORDER BY id) as avg_id, " +
+          "SUM(id) OVER (PARTITION BY id % 2 ORDER BY id) as sum_id FROM range(10)") {
+        df => checkOperatorCount[ProjectExecTransformer](4)(df)
+      }
+
+      // CSE in aggregate
+      runQueryAndCompare(
+        "select id % 2, max(hash(id)), min(hash(id)) " +
+          "from range(10) group by id % 2") {
+        df => checkOperatorCount[ProjectExecTransformer](1)(df)
+      }
+      runQueryAndCompare(
+        "select id % 10, sum(id +100) + max(id+100) from range(100) group by id % 10") {
+        df => checkOperatorCount[ProjectExecTransformer](2)(df)
+      }
+      // issue https://github.com/oap-project/gluten/issues/4642
+      runQueryAndCompare(
+        "select id, if(id % 2 = 0, sum(id), max(id)) as s1, " +
+          "if(id %2 = 0, sum(id+1), sum(id+2)) as s2 from range(10) group by id") {
+        df => checkOperatorCount[ProjectExecTransformer](2)(df)
+      }
+
+      // CSE in sort
+      runQueryAndCompare(
+        "select id from range(10) " +
+          "order by hash(id%10), hash(hash(id%10))") {
+        df => checkOperatorCount[ProjectExecTransformer](3)(df)
+      }
+    }
+  }
+
+  test("test function getarraystructfields") {
+    val sql =
+      """
+        |SELECT id,
+        |       struct_array[0].field1,
+        |       struct_array[0].field2
+        |FROM (
+        |  SELECT id,
+        |         array(struct(id as field1, (id+1) as field2)) as struct_array
+        |  FROM range(10)
+        |) t
+      """.stripMargin
+    runQueryAndCompare(sql)(checkOperatorMatch[ProjectExecTransformer])
   }
 }

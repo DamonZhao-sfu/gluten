@@ -40,7 +40,6 @@
 #include "utils/exception.h"
 #include "velox/common/caching/SsdCache.h"
 #include "velox/common/file/FileSystems.h"
-#include "velox/common/memory/MmapAllocator.h"
 #include "velox/connectors/hive/HiveConnector.h"
 #include "velox/connectors/hive/HiveDataSource.h"
 #include "velox/serializers/PrestoSerializer.h"
@@ -48,6 +47,7 @@
 DECLARE_bool(velox_exception_user_stacktrace_enabled);
 DECLARE_int32(velox_memory_num_shared_leaf_pools);
 DECLARE_bool(velox_memory_use_hugepages);
+DECLARE_int32(cache_prefetch_min_pct);
 
 DECLARE_int32(gluten_velox_aysnc_timeout_on_task_stopping);
 DEFINE_int32(gluten_velox_aysnc_timeout_on_task_stopping, 30000, "Aysnc timout when task is being stopped");
@@ -59,12 +59,6 @@ namespace {
 const std::string kEnableUserExceptionStacktrace =
     "spark.gluten.sql.columnar.backend.velox.enableUserExceptionStacktrace";
 const bool kEnableUserExceptionStacktraceDefault = true;
-
-const std::string kGlogVerboseLevel = "spark.gluten.sql.columnar.backend.velox.glogVerboseLevel";
-const uint32_t kGlogVerboseLevelDefault = 0;
-
-const std::string kGlogSeverityLevel = "spark.gluten.sql.columnar.backend.velox.glogSeverityLevel";
-const uint32_t kGlogSeverityLevelDefault = 1;
 
 const std::string kEnableSystemExceptionStacktrace =
     "spark.gluten.sql.columnar.backend.velox.enableSystemExceptionStacktrace";
@@ -111,6 +105,18 @@ const std::string kBacktraceAllocation = "spark.gluten.backtrace.allocation";
 // VeloxShuffleReader print flag.
 const std::string kVeloxShuffleReaderPrintFlag = "spark.gluten.velox.shuffleReaderPrintFlag";
 
+const std::string kVeloxFileHandleCacheEnabled = "spark.gluten.sql.columnar.backend.velox.fileHandleCacheEnabled";
+const bool kVeloxFileHandleCacheEnabledDefault = false;
+
+/* configs for file read in velox*/
+const std::string kDirectorySizeGuess = "spark.gluten.sql.columnar.backend.velox.directorySizeGuess";
+const std::string kFilePreloadThreshold = "spark.gluten.sql.columnar.backend.velox.filePreloadThreshold";
+const std::string kPrefetchRowGroups = "spark.gluten.sql.columnar.backend.velox.prefetchRowGroups";
+const std::string kLoadQuantum = "spark.gluten.sql.columnar.backend.velox.loadQuantum";
+const std::string kMaxCoalescedDistanceBytes = "spark.gluten.sql.columnar.backend.velox.maxCoalescedDistanceBytes";
+const std::string kMaxCoalescedBytes = "spark.gluten.sql.columnar.backend.velox.maxCoalescedBytes";
+const std::string kCachePrefetchMinPct = "spark.gluten.sql.columnar.backend.velox.cachePrefetchMinPct";
+
 } // namespace
 
 namespace gluten {
@@ -122,10 +128,11 @@ gluten::Runtime* veloxRuntimeFactory(const std::unordered_map<std::string, std::
 } // namespace
 
 void VeloxBackend::init(const std::unordered_map<std::string, std::string>& conf) {
+  backendConf_ = conf;
+
   // Register Velox runtime factory
   gluten::Runtime::registerFactory(gluten::kVeloxRuntimeKind, veloxRuntimeFactory);
 
-  // Init glog and log level.
   std::shared_ptr<const facebook::velox::Config> veloxcfg =
       std::make_shared<facebook::velox::core::MemConfigMutable>(conf);
 
@@ -133,13 +140,16 @@ void VeloxBackend::init(const std::unordered_map<std::string, std::string>& conf
     LOG(INFO) << "VeloxBackend config:" << printConfig(veloxcfg->valuesCopy());
   }
 
+  // Init glog and log level.
   if (!veloxcfg->get<bool>(kDebugModeEnabled, false)) {
-    uint32_t vlogLevel = veloxcfg->get<uint32_t>(kGlogVerboseLevel, kGlogVerboseLevelDefault);
-    FLAGS_v = vlogLevel;
-    uint32_t severityLogLevel = veloxcfg->get<uint32_t>(kGlogSeverityLevel, kGlogSeverityLevelDefault);
-    FLAGS_minloglevel = severityLogLevel;
+    FLAGS_v = veloxcfg->get<uint32_t>(kGlogVerboseLevel, kGlogVerboseLevelDefault);
+    FLAGS_minloglevel = veloxcfg->get<uint32_t>(kGlogSeverityLevel, kGlogSeverityLevelDefault);
   } else {
-    FLAGS_v = 99;
+    if (veloxcfg->isValueExists(kGlogVerboseLevel)) {
+      FLAGS_v = veloxcfg->get<uint32_t>(kGlogVerboseLevel, kGlogVerboseLevelDefault);
+    } else {
+      FLAGS_v = kGlogVerboseLevelMaximum;
+    }
   }
   FLAGS_logtostderr = true;
   google::InitGoogleLogging("gluten");
@@ -164,9 +174,6 @@ void VeloxBackend::init(const std::unordered_map<std::string, std::string>& conf
 
   // Set backtrace_allocation
   gluten::backtrace_allocation = veloxcfg->get<bool>(kBacktraceAllocation, false);
-
-  // Set veloxShuffleReaderPrintFlag
-  gluten::veloxShuffleReaderPrintFlag = veloxcfg->get<bool>(kVeloxShuffleReaderPrintFlag, false);
 
   // Setup and register.
   velox::filesystems::registerLocalFileSystem();
@@ -233,14 +240,14 @@ void VeloxBackend::initCache(const std::shared_ptr<const facebook::velox::Config
 
     velox::memory::MmapAllocator::Options options;
     options.capacity = memCacheSize;
-    auto allocator = std::make_shared<velox::memory::MmapAllocator>(options);
+    cacheAllocator_ = std::make_shared<velox::memory::MmapAllocator>(options);
     if (ssdCacheSize == 0) {
       LOG(INFO) << "AsyncDataCache will do memory caching only as ssd cache size is 0";
       // TODO: this is not tracked by Spark.
-      asyncDataCache_ = velox::cache::AsyncDataCache::create(allocator.get());
+      asyncDataCache_ = velox::cache::AsyncDataCache::create(cacheAllocator_.get());
     } else {
       // TODO: this is not tracked by Spark.
-      asyncDataCache_ = velox::cache::AsyncDataCache::create(allocator.get(), std::move(ssd));
+      asyncDataCache_ = velox::cache::AsyncDataCache::create(cacheAllocator_.get(), std::move(ssd));
     }
 
     VELOX_CHECK_NOT_NULL(dynamic_cast<velox::cache::AsyncDataCache*>(asyncDataCache_.get()))
@@ -272,6 +279,30 @@ void VeloxBackend::initConnector(const std::shared_ptr<const facebook::velox::Co
   }
 #endif
 
+  mutableConf->setValue(
+      velox::connector::hive::HiveConfig::kEnableFileHandleCache,
+      conf->get<bool>(kVeloxFileHandleCacheEnabled, kVeloxFileHandleCacheEnabledDefault) ? "true" : "false");
+
+  mutableConf->setValue(
+      velox::connector::hive::HiveConfig::kMaxCoalescedBytes,
+      conf->get<std::string>(kMaxCoalescedBytes, "67108864")); // 64M
+  mutableConf->setValue(
+      velox::connector::hive::HiveConfig::kMaxCoalescedDistanceBytes,
+      conf->get<std::string>(kMaxCoalescedDistanceBytes, "1048576")); // 1M
+  mutableConf->setValue(
+      velox::connector::hive::HiveConfig::kPrefetchRowGroups, conf->get<std::string>(kPrefetchRowGroups, "1"));
+  mutableConf->setValue(
+      velox::connector::hive::HiveConfig::kLoadQuantum, conf->get<std::string>(kLoadQuantum, "268435456")); // 256M
+  mutableConf->setValue(
+      velox::connector::hive::HiveConfig::kFooterEstimatedSize,
+      conf->get<std::string>(kDirectorySizeGuess, "32768")); // 32K
+  mutableConf->setValue(
+      velox::connector::hive::HiveConfig::kFilePreloadThreshold,
+      conf->get<std::string>(kFilePreloadThreshold, "1048576")); // 1M
+
+  // set cache_prefetch_min_pct default as 0 to force all loads are prefetched in DirectBufferInput.
+  FLAGS_cache_prefetch_min_pct = conf->get<int>(kCachePrefetchMinPct, 0);
+
   if (ioThreads > 0) {
     ioExecutor_ = std::make_unique<folly::IOThreadPoolExecutor>(ioThreads);
   }
@@ -302,6 +333,10 @@ VeloxBackend* VeloxBackend::get() {
     throw GlutenException("VeloxBackend instance is null.");
   }
   return instance_.get();
+}
+
+const std::unordered_map<std::string, std::string>& VeloxBackend::getBackendConf() const {
+  return backendConf_;
 }
 
 } // namespace gluten

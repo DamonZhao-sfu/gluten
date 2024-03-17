@@ -6,10 +6,12 @@ nav_order: 5
 This document describes the limitations of velox backend by listing some known cases where exception will be thrown, gluten behaves incompatibly with spark, or certain plan's execution
 must fall back to vanilla spark, etc.
 
-### Override of Spark classes
+### Override of Spark classes (For Spark3.2 and Spark3.3)
 Gluten avoids to modify Spark's existing code and use Spark APIs if possible. However, some APIs aren't exposed in Vanilla spark and we have to copy the Spark file and do the hardcode changes. The list of override classes can be found as ignoreClasses in package/pom.xml . If you use customized Spark, you may check if the files are modified in your spark, otherwise your changes will be overrided.
 
-So you need to ensure preferentially load the Gluten jar to overwrite the jar of vanilla spark. Refer to [How to prioritize loading Gluten jars in Spark](https://github.com/oap-project/gluten/blob/main/docs/velox-backend-troubleshooting.md#incompatible-class-error-when-using-native-writer).
+So you need to ensure preferentially load the Gluten jar to overwrite the jar of vanilla spark. Refer to [How to prioritize loading Gluten jars in Spark](https://github.com/apache/incubator-gluten/blob/main/docs/velox-backend-troubleshooting.md#incompatible-class-error-when-using-native-writer).
+
+If not officially supported spark3.2/3.3 version is used, NoSuchMethodError can be thrown at runtime. More details see [issue-4514](https://github.com/apache/incubator-gluten/issues/4514).
 
 ### Fallbacks
 Except the unsupported operators, functions, file formats, data sources listed in , there are some known cases also fall back to Vanilla Spark. 
@@ -33,14 +35,14 @@ Currently, Gluten only fully supports parquet file format and partially support 
 #### Partitioned Table Scan
 Gluten only support the partitioned table scan when the file path contain the partition info, otherwise will fall back to vanilla spark.
 
-### incompatible behavior
+### Incompatible behavior
 In certain cases, Gluten result may be different from Vanilla spark.
 
 #### JSON functions
 Velox only supports double quotes surrounded strings, not single quotes, in JSON data. If single quotes are used, gluten will produce incorrect result.
 
 #### Parquet read conf
-Gluten supports `spark.files.ignoreCorruptFiles` and `spark.files.ignoreMissingFiles` with default false, if true, the behavior is same as config false.
+Gluten supports `spark.files.ignoreCorruptFiles` with default false, if true, the behavior is same as config false.
 Gluten ignores `spark.sql.parquet.datetimeRebaseModeInRead`, it only returns what write in parquet file. It does not consider the difference between legacy
 hybrid (Julian Gregorian) calendar and Proleptic Gregorian calendar. The result may be different with vanilla spark.
 
@@ -49,7 +51,7 @@ Spark has `spark.sql.parquet.datetimeRebaseModeInWrite` config to decide whether
 or Proleptic Gregorian calendar should be used during parquet writing for dates/timestamps. If the parquet to read is written
 by Spark with this config as true, Velox's TableScan will output different result when reading it back.
 
-#### Partition write
+#### Partition write (For Spark3.2 and Spark3.3)
 
 Gluten only supports static partition writes and does not support dynamic partition writes.
 
@@ -67,9 +69,39 @@ spark.range(100).selectExpr("id as c1", "id % 7 as p")
   .save(f.getCanonicalPath)
 ```
 
-#### CTAS write
+#### Partition write (For Spark3.4 and later)
 
-Velox does not create table as select. It may raise exception. e.g.,
+Gluten supports static partition writes and dynamic partition writes.
+
+```scala
+spark.sql("CREATE TABLE t (c int, d long, e long) STORED AS PARQUET partitioned by (c, d)")
+spark.sql("INSERT OVERWRITE TABLE t partition(c=1, d) SELECT 2 as d, 3 as e")
+```
+
+Gluten does not support bucket write, and will fall back to vanilla Spark.
+
+```scala
+spark.range(100).selectExpr("id as c1", "id % 7 as p")
+  .write
+  .format("parquet")
+  .bucketBy(2, "c1")
+  .save(f.getCanonicalPath)
+```
+
+#### CTAS write (For Spark3.2 and Spark3.3)
+
+Gluten does not create table as select. It may raise exception. e.g.,
+
+```scala
+spark.range(100).toDF("id")
+  .write
+  .format("parquet")
+  .saveAsTable("velox_ctas")
+```
+
+#### CTAS write (For Spark3.4 and later)
+
+Gluten supports create table as select with parquet file format.
 
 ```scala
 spark.range(100).toDF("id")
@@ -102,16 +134,6 @@ Parquet write only support three configs, other will not take effect.
 ### Fetal error caused by Spark's columnar reading
 If the user enables Spark's columnar reading, error can occur due to Spark's columnar vector is not compatible with
 Gluten's.
-
-### Exception caused by File compression codec
-Some compression codecs are not supported in Velox on certain file format.
-Exception occurs when Velox TableScan is used to read files with unsupported compression codec.
-
-| File Format | none | zlib | zstd | snappy | lzo | lz4 | gzip |
-|-------------|------|------|------|--------|-----|-----|------|
-| Parquet     | Y    | N    | Y    | Y      | N   | N   | Y    |
-| DWRF        | Y    | Y    | Y    | Y      | Y   | Y   | N    |
-
 
 ### Spill
 

@@ -37,7 +37,6 @@ class GlutenClickHouseTPCDSParquetGraceHashJoinSuite extends GlutenClickHouseTPC
       .set("spark.io.compression.codec", "snappy")
       .set("spark.sql.shuffle.partitions", "5")
       .set("spark.sql.autoBroadcastJoinThreshold", "10MB")
-      .set("spark.gluten.sql.columnar.backend.ch.use.v2", "false")
       .set("spark.memory.offHeap.size", "8g")
       .set("spark.gluten.sql.columnar.backend.ch.runtime_settings.join_algorithm", "grace_hash")
       .set("spark.gluten.sql.columnar.backend.ch.runtime_settings.max_bytes_in_join", "3145728")
@@ -96,6 +95,47 @@ class GlutenClickHouseTPCDSParquetGraceHashJoinSuite extends GlutenClickHouseTPC
 
     val df = spark.sql(testSql)
     assert(FallbackUtil.hasFallback(df.queryExecution.executedPlan))
+  }
+
+  test("Gluten-4458: test clickhouse not support join with IN condition") {
+    val testSql =
+      """
+        | SELECT *
+        | FROM date_dim t1
+        | LEFT JOIN date_dim t2 ON t1.d_date_sk = t2.d_date_sk
+        |   AND datediff(t1.d_day_name, t2.d_day_name) IN (1, 3)
+        | LIMIT 100;
+        |""".stripMargin
+
+    val df = spark.sql(testSql)
+    assert(FallbackUtil.hasFallback(df.queryExecution.executedPlan))
+  }
+
+  test("Gluten-4458: test join with Equal computing two table in one side") {
+    val testSql =
+      """
+        | SELECT *
+        | FROM date_dim t1
+        | LEFT JOIN date_dim t2 ON t1.d_date_sk = t2.d_date_sk AND t1.d_year - t2.d_year = 1
+        | LIMIT 100;
+        |""".stripMargin
+
+    val df = spark.sql(testSql)
+    assert(FallbackUtil.hasFallback(df.queryExecution.executedPlan))
+  }
+
+  test("Gluten-4458: test inner join can support join with IN condition") {
+    val testSql =
+      """
+        | SELECT *
+        | FROM date_dim t1
+        | INNER JOIN date_dim t2 ON t1.d_date_sk = t2.d_date_sk
+        |   AND datediff(t1.d_day_name, t2.d_day_name) IN (1, 3)
+        | LIMIT 100;
+        |""".stripMargin
+
+    val df = spark.sql(testSql)
+    assert(!FallbackUtil.hasFallback(df.queryExecution.executedPlan))
   }
 
   test("Gluten-1235: Fix missing reading from the broadcasted value when executing DPP") {
@@ -182,4 +222,31 @@ class GlutenClickHouseTPCDSParquetGraceHashJoinSuite extends GlutenClickHouseTPC
     }
   }
 
+  test("Gluten-4452: Fix get wrong hash table when multi joins in a task") {
+    val testSql =
+      """
+        | SELECT ws_item_sk, ws_sold_date_sk, ws_ship_date_sk,
+        |        t3.d_date_id as sold_date_id, t2.d_date_id as ship_date_id
+        | FROM (
+        | SELECT ws_item_sk, ws_sold_date_sk, ws_ship_date_sk, t1.d_date_id
+        | FROM web_sales
+        | LEFT JOIN
+        |   (SELECT d_date_id, d_date_sk from date_dim GROUP BY d_date_id, d_date_sk) t1
+        | ON ws_sold_date_sk == t1.d_date_sk) t3
+        | INNER JOIN
+        |   (SELECT d_date_id, d_date_sk from date_dim GROUP BY d_date_id, d_date_sk) t2
+        | ON ws_ship_date_sk == t2.d_date_sk
+        | LIMIT 100;
+        |""".stripMargin
+    compareResultsAgainstVanillaSpark(
+      testSql,
+      true,
+      df => {
+        val foundBroadcastHashJoinExpr = df.queryExecution.executedPlan.collect {
+          case f: CHBroadcastHashJoinExecTransformer => f
+        }
+        assert(foundBroadcastHashJoinExpr.size == 2)
+      }
+    )
+  }
 }

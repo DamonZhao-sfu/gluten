@@ -13,6 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
+if (ENABLE_MULTITARGET_CODE)
+    add_definitions(-DENABLE_MULTITARGET_CODE=1)
+else()
+    add_definitions(-DENABLE_MULTITARGET_CODE=0)
+endif()
+
 set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -w -ffunction-sections -fdata-sections")
 set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -w -ffunction-sections -fdata-sections")
 set (CMAKE_SHARED_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--no-export-dynamic -Wl,--gc-sections")
@@ -31,8 +38,7 @@ include(UseJava)
 include(FindJNI)
 
 #set(JNI_NATIVE_SOURCES local_engine_jni.cpp)
-set(LOCALENGINE_SHARED_LIB ch)
-set (ENABLE_CURL_BUILD OFF)
+set(LOCALENGINE_SHARED_LIB _gluten_ch)
 
 add_subdirectory(proto)
 
@@ -44,6 +50,7 @@ add_headers_and_sources(storages Storages)
 add_headers_and_sources(storages Storages/Output)
 add_headers_and_sources(storages Storages/Serializations)
 add_headers_and_sources(storages Storages/IO)
+add_headers_and_sources(storages Storages/Mergetree)
 add_headers_and_sources(common Common)
 add_headers_and_sources(external External)
 add_headers_and_sources(shuffle Shuffle)
@@ -131,7 +138,7 @@ PRIVATE
         substrait
 )
 
-target_link_libraries(${LOCALENGINE_SHARED_LIB} PUBLIC ch_parquet)
+#TODO: target_link_libraries(${LOCALENGINE_SHARED_LIB} PUBLIC ch_parquet)
 
 if (ENABLE_JEMALLOC)
     target_link_options(${LOCALENGINE_SHARED_LIB} PRIVATE
@@ -140,6 +147,20 @@ else()
     target_link_options(${LOCALENGINE_SHARED_LIB} PRIVATE
         -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libch-hide-jemalloc.map)
 endif()
+
+if ("${CMAKE_BUILD_TYPE}" MATCHES "Debug")
+    set(LOCALENGINE_SHARED_LIB_NAME "libchd.so")
+else ()
+    set(LOCALENGINE_SHARED_LIB_NAME "libch.so")
+endif ()
+
+add_custom_command(
+        OUTPUT ${LOCALENGINE_SHARED_LIB_NAME}
+        COMMAND ${CMAKE_COMMAND} -E rename $<TARGET_FILE:${LOCALENGINE_SHARED_LIB}> ${LOCALENGINE_SHARED_LIB_NAME}
+        COMMENT "Renaming $<TARGET_FILE:${LOCALENGINE_SHARED_LIB}> to ${LOCALENGINE_SHARED_LIB_NAME}"
+        DEPENDS ${LOCALENGINE_SHARED_LIB})
+
+add_custom_target(libch ALL DEPENDS ${LOCALENGINE_SHARED_LIB_NAME})
 
 add_subdirectory(tests)
 

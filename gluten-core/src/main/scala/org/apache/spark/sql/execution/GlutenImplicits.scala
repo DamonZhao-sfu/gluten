@@ -17,7 +17,8 @@
 package org.apache.spark.sql.execution
 
 import io.glutenproject.execution.WholeStageTransformer
-import io.glutenproject.extension.{GlutenPlan, InMemoryTableScanHelper}
+import io.glutenproject.extension.GlutenPlan
+import io.glutenproject.utils.PlanUtil
 
 import org.apache.spark.sql.{AnalysisException, Dataset}
 import org.apache.spark.sql.catalyst.plans.QueryPlan
@@ -28,6 +29,7 @@ import org.apache.spark.sql.execution.adaptive.{AdaptiveSparkPlanExec, AQEShuffl
 import org.apache.spark.sql.execution.columnar.InMemoryTableScanExec
 import org.apache.spark.sql.execution.command.{DataWritingCommandExec, ExecutedCommandExec}
 import org.apache.spark.sql.execution.datasources.v2.V2CommandExec
+import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
 import org.apache.spark.sql.internal.SQLConf
 
 import scala.collection.mutable
@@ -106,9 +108,11 @@ object GlutenImplicits {
           case _: WholeStageCodegenExec =>
           case _: WholeStageTransformer =>
           case _: InputAdapter =>
+          case _: ColumnarInputAdapter =>
           case _: InputIteratorTransformer =>
           case _: ColumnarToRowTransition =>
           case _: RowToColumnarTransition =>
+          case p: ReusedExchangeExec =>
           case p: AdaptiveSparkPlanExec if isFinalAdaptivePlan(p) =>
             collect(p.executedPlan)
           case p: AdaptiveSparkPlanExec =>
@@ -136,7 +140,7 @@ object GlutenImplicits {
             numGlutenNodes += 1
             p.innerChildren.foreach(collect)
           case i: InMemoryTableScanExec =>
-            if (InMemoryTableScanHelper.isGlutenTableCache(i)) {
+            if (PlanUtil.isGlutenTableCache(i)) {
               numGlutenNodes += 1
             } else {
               addFallbackNodeWithReason(i, "Columnar table cache is disabled", fallbackNodeToReason)

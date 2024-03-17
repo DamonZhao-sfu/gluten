@@ -50,8 +50,20 @@ std::string VeloxSubstraitSignature::toSubstraitSignature(const TypePtr& type) {
       return "list";
     case TypeKind::MAP:
       return "map";
-    case TypeKind::ROW:
-      return "struct";
+    case TypeKind::ROW: {
+      std::stringstream buffer;
+      buffer << "struct<";
+      const auto& rt = asRowType(type);
+      for (size_t i = 0; i < rt->children().size(); i++) {
+        buffer << toSubstraitSignature(rt->childAt(i));
+        if (i == rt->children().size() - 1) {
+          continue;
+        }
+        buffer << ",";
+      }
+      buffer << ">";
+      return buffer.str();
+    }
     case TypeKind::UNKNOWN:
       return "u!name";
     default:
@@ -156,6 +168,20 @@ TypePtr VeloxSubstraitSignature::fromSubstraitSignature(const std::string& signa
     }
     return std::make_shared<RowType>(std::move(names), std::move(types));
   }
+
+  if (startWith(signature, "list")) {
+    auto listStart = signature.find_first_of('<');
+    auto listEnd = signature.find_last_of('>');
+    VELOX_CHECK(
+        listEnd - listStart > 1,
+        "Native validation failed due to: more information is needed to create ListType: {}",
+        signature);
+
+    auto elementTypeStr = signature.substr(listStart + 1, listEnd - listStart - 1);
+    auto elementType = fromSubstraitSignature(elementTypeStr);
+    return ARRAY(elementType);
+  }
+
   VELOX_UNSUPPORTED("Substrait type signature conversion to Velox type not supported for {}.", signature);
 }
 

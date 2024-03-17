@@ -83,6 +83,8 @@ TypePtr SubstraitParser::parseType(const ::substrait::Type& substraitType, bool 
       auto scale = substraitType.decimal().scale();
       return DECIMAL(precision, scale);
     }
+    case ::substrait::Type::KindCase::kNothing:
+      return UNKNOWN();
     default:
       VELOX_NYI("Parsing for Substrait type not supported: {}", substraitType.DebugString());
   }
@@ -102,31 +104,41 @@ std::vector<TypePtr> SubstraitParser::parseNamedStruct(const ::substrait::NamedS
   return typeList;
 }
 
-std::vector<bool> SubstraitParser::parsePartitionColumns(const ::substrait::NamedStruct& namedStruct) {
+void SubstraitParser::parsePartitionAndMetadataColumns(
+    const ::substrait::NamedStruct& namedStruct,
+    std::vector<bool>& isPartitionColumns,
+    std::vector<bool>& isMetadataColumns) {
   const auto& columnsTypes = namedStruct.column_types();
-  std::vector<bool> isPartitionColumns;
   if (columnsTypes.size() == 0) {
-    // Regard all columns as non-partitioned columns.
+    // Regard all columns as regular columns.
     isPartitionColumns.resize(namedStruct.names().size(), false);
-    return isPartitionColumns;
+    isMetadataColumns.resize(namedStruct.names().size(), false);
+    return;
   } else {
     VELOX_CHECK_EQ(columnsTypes.size(), namedStruct.names().size(), "Wrong size for column types and column names.");
   }
 
   isPartitionColumns.reserve(columnsTypes.size());
+  isMetadataColumns.reserve(columnsTypes.size());
   for (const auto& columnType : columnsTypes) {
     switch (columnType) {
       case ::substrait::NamedStruct::NORMAL_COL:
         isPartitionColumns.emplace_back(false);
+        isMetadataColumns.emplace_back(false);
         break;
       case ::substrait::NamedStruct::PARTITION_COL:
         isPartitionColumns.emplace_back(true);
+        isMetadataColumns.emplace_back(false);
+        break;
+      case ::substrait::NamedStruct::METADATA_COL:
+        isPartitionColumns.emplace_back(false);
+        isMetadataColumns.emplace_back(true);
         break;
       default:
         VELOX_FAIL("Unspecified column type.");
     }
   }
-  return isPartitionColumns;
+  return;
 }
 
 int32_t SubstraitParser::parseReferenceSegment(const ::substrait::Expression::ReferenceSegment& refSegment) {
@@ -136,7 +148,7 @@ int32_t SubstraitParser::parseReferenceSegment(const ::substrait::Expression::Re
       return refSegment.struct_field().field();
     }
     default:
-      VELOX_NYI("Substrait conversion not supported for ReferenceSegment '{}'", typeCase);
+      VELOX_NYI("Substrait conversion not supported for ReferenceSegment '{}'", std::to_string(typeCase));
   }
 }
 
@@ -149,8 +161,8 @@ std::vector<std::string> SubstraitParser::makeNames(const std::string& prefix, i
   return names;
 }
 
-std::string SubstraitParser::makeNodeName(int node_id, int col_idx) {
-  return fmt::format("n{}_{}", node_id, col_idx);
+std::string SubstraitParser::makeNodeName(int nodeId, int colIdx) {
+  return fmt::format("n{}_{}", nodeId, colIdx);
 }
 
 int SubstraitParser::getIdxFromNodeName(const std::string& nodeName) {
@@ -277,6 +289,86 @@ std::vector<TypePtr> SubstraitParser::sigToTypes(const std::string& signature) {
   return types;
 }
 
+template <typename T>
+T SubstraitParser::getLiteralValue(const ::substrait::Expression::Literal& /* literal */) {
+  VELOX_NYI();
+}
+
+template <>
+facebook::velox::UnknownValue gluten::SubstraitParser::getLiteralValue(const substrait::Expression_Literal& literal) {
+  return UnknownValue();
+}
+
+template <>
+int8_t SubstraitParser::getLiteralValue(const ::substrait::Expression::Literal& literal) {
+  return static_cast<int8_t>(literal.i8());
+}
+
+template <>
+int16_t SubstraitParser::getLiteralValue(const ::substrait::Expression::Literal& literal) {
+  return static_cast<int16_t>(literal.i16());
+}
+
+template <>
+int32_t SubstraitParser::getLiteralValue(const ::substrait::Expression::Literal& literal) {
+  if (literal.has_date()) {
+    return int32_t(literal.date());
+  }
+  return literal.i32();
+}
+
+template <>
+int64_t SubstraitParser::getLiteralValue(const ::substrait::Expression::Literal& literal) {
+  if (literal.has_decimal()) {
+    auto decimal = literal.decimal().value();
+    int128_t decimalValue;
+    memcpy(&decimalValue, decimal.c_str(), 16);
+    return static_cast<int64_t>(decimalValue);
+  }
+  return literal.i64();
+}
+
+template <>
+int128_t SubstraitParser::getLiteralValue(const ::substrait::Expression::Literal& literal) {
+  auto decimal = literal.decimal().value();
+  int128_t decimalValue;
+  memcpy(&decimalValue, decimal.c_str(), 16);
+  return HugeInt::build(static_cast<uint64_t>(decimalValue >> 64), static_cast<uint64_t>(decimalValue));
+}
+
+template <>
+double SubstraitParser::getLiteralValue(const ::substrait::Expression::Literal& literal) {
+  return literal.fp64();
+}
+
+template <>
+float SubstraitParser::getLiteralValue(const ::substrait::Expression::Literal& literal) {
+  return literal.fp32();
+}
+
+template <>
+bool SubstraitParser::getLiteralValue(const ::substrait::Expression::Literal& literal) {
+  return literal.boolean();
+}
+
+template <>
+Timestamp SubstraitParser::getLiteralValue(const ::substrait::Expression::Literal& literal) {
+  return Timestamp::fromMicros(literal.timestamp());
+}
+
+template <>
+StringView SubstraitParser::getLiteralValue(const ::substrait::Expression::Literal& literal) {
+  if (literal.has_string()) {
+    return StringView(literal.string());
+  } else if (literal.has_var_char()) {
+    return StringView(literal.var_char().value());
+  } else if (literal.has_binary()) {
+    return StringView(literal.binary());
+  } else {
+    VELOX_FAIL("Unexpected string or binary literal");
+  }
+}
+
 std::unordered_map<std::string, std::string> SubstraitParser::substraitVeloxFunctionMap_ = {
     {"is_not_null", "isnotnull"}, /*Spark functions.*/
     {"is_null", "isnull"},
@@ -293,14 +385,12 @@ std::unordered_map<std::string, std::string> SubstraitParser::substraitVeloxFunc
     {"starts_with", "startswith"},
     {"named_struct", "row_constructor"},
     {"bit_or", "bitwise_or_agg"},
-    {"bit_or_partial", "bitwise_or_agg_partial"},
-    {"bit_or_merge", "bitwise_or_agg_merge"},
     {"bit_and", "bitwise_and_agg"},
-    {"bit_and_partial", "bitwise_and_agg_partial"},
-    {"bit_and_merge", "bitwise_and_agg_merge"},
     {"murmur3hash", "hash_with_seed"},
-    {"modulus", "mod"}, /*Presto functions.*/
-    {"date_format", "format_datetime"}};
+    {"modulus", "remainder"},
+    {"date_format", "format_datetime"},
+    {"collect_set", "set_agg"},
+    {"collect_list", "array_agg"}};
 
 const std::unordered_map<std::string, std::string> SubstraitParser::typeMap_ = {
     {"bool", "BOOLEAN"},

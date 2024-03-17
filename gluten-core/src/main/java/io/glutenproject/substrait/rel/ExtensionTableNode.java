@@ -18,11 +18,13 @@ package io.glutenproject.substrait.rel;
 
 import io.glutenproject.backendsapi.BackendsApiManager;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.protobuf.StringValue;
 import io.substrait.proto.ReadRel;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 public class ExtensionTableNode implements SplitInfo {
   private static final String MERGE_TREE = "MergeTree;";
@@ -31,8 +33,23 @@ public class ExtensionTableNode implements SplitInfo {
   private String database;
   private String tableName;
   private String relativePath;
+  private String absolutePath;
+  private String tableSchemaJson;
   private StringBuffer extensionTableStr = new StringBuffer(MERGE_TREE);
+  private StringBuffer partPathList = new StringBuffer("");
   private final List<String> preferredLocations = new ArrayList<>();
+
+  private String orderByKey;
+
+  private String primaryKey;
+
+  private String lowCardKey;
+
+  private List<String> partList;
+  private List<Long> starts;
+  private List<Long> lengths;
+
+  private Map<String, String> clickhouseTableConfigs;
 
   ExtensionTableNode(
       Long minPartsNum,
@@ -40,25 +57,99 @@ public class ExtensionTableNode implements SplitInfo {
       String database,
       String tableName,
       String relativePath,
+      String absolutePath,
+      String orderByKey,
+      String lowCardKey,
+      String primaryKey,
+      List<String> partList,
+      List<Long> starts,
+      List<Long> lengths,
+      String tableSchemaJson,
+      Map<String, String> clickhouseTableConfigs,
       List<String> preferredLocations) {
     this.minPartsNum = minPartsNum;
     this.maxPartsNum = maxPartsNum;
     this.database = database;
     this.tableName = tableName;
-    this.relativePath = relativePath;
+    if (relativePath.contains(":/")) { // file:/tmp/xxx => tmp/xxx
+      this.relativePath = relativePath.substring(relativePath.indexOf(":/") + 2);
+    } else {
+      this.relativePath = relativePath;
+    }
+    this.absolutePath = absolutePath;
+    this.tableSchemaJson = tableSchemaJson;
+    this.orderByKey = orderByKey;
+    this.lowCardKey = lowCardKey;
+    this.primaryKey = primaryKey;
+    this.partList = partList;
+    this.starts = starts;
+    this.lengths = lengths;
+    this.clickhouseTableConfigs = clickhouseTableConfigs;
     this.preferredLocations.addAll(preferredLocations);
-    // MergeTree;{database}\n{table}\n{relative_path}\n{min_part}\n{max_part}\n
+
+    // New: MergeTree;{database}\n{table}\n{orderByKey}\n{primaryKey}\n{relative_path}\n
+    // {part_path1}\n{part_path2}\n...
+    long end = 0;
+    for (int i = 0; i < this.partList.size(); i++) {
+      end = this.starts.get(i) + this.lengths.get(i);
+      partPathList
+          .append(this.partList.get(i))
+          .append("\n")
+          .append(this.starts.get(i))
+          .append("\n")
+          .append(end)
+          .append("\n");
+    }
+
     extensionTableStr
         .append(database)
         .append("\n")
         .append(tableName)
         .append("\n")
-        .append(relativePath)
+        .append(tableSchemaJson)
         .append("\n")
-        .append(this.minPartsNum)
-        .append("\n")
-        .append(this.maxPartsNum)
+        .append(this.orderByKey)
         .append("\n");
+
+    if (!this.orderByKey.isEmpty() && !this.orderByKey.equals("tuple()")) {
+      extensionTableStr.append(this.primaryKey).append("\n");
+    }
+    extensionTableStr.append(this.lowCardKey).append("\n");
+    extensionTableStr.append(this.relativePath).append("\n");
+    extensionTableStr.append(this.absolutePath).append("\n");
+
+    if (this.clickhouseTableConfigs != null && !this.clickhouseTableConfigs.isEmpty()) {
+      ObjectMapper objectMapper = new ObjectMapper();
+      try {
+        String clickhouseTableConfigsJson =
+            objectMapper
+                .writeValueAsString(this.clickhouseTableConfigs)
+                .replaceAll("\\\n", "")
+                .replaceAll(" ", "");
+        extensionTableStr.append(clickhouseTableConfigsJson).append("\n");
+      } catch (Exception e) {
+        extensionTableStr.append("").append("\n");
+      }
+    } else {
+      extensionTableStr.append("").append("\n");
+    }
+    extensionTableStr.append(partPathList);
+    /* old format
+    if (!this.partList.isEmpty()) {
+    } else {
+      // Old: MergeTree;{database}\n{table}\n{relative_path}\n{min_part}\n{max_part}\n
+      extensionTableStr
+          .append(database)
+          .append("\n")
+          .append(tableName)
+          .append("\n")
+          .append(relativePath)
+          .append("\n")
+          .append(this.minPartsNum)
+          .append("\n")
+          .append(this.maxPartsNum)
+          .append("\n");
+    } */
   }
 
   @Override
@@ -73,5 +164,17 @@ public class ExtensionTableNode implements SplitInfo {
     extensionTableBuilder.setDetail(
         BackendsApiManager.getTransformerApiInstance().packPBMessage(extensionTable));
     return extensionTableBuilder.build();
+  }
+
+  public String getRelativePath() {
+    return relativePath;
+  }
+
+  public String getAbsolutePath() {
+    return absolutePath;
+  }
+
+  public List<String> getPartList() {
+    return partList;
   }
 }

@@ -19,23 +19,22 @@ package io.glutenproject.backendsapi.clickhouse
 import io.glutenproject.{GlutenConfig, GlutenNumaBindingInfo}
 import io.glutenproject.backendsapi.IteratorApi
 import io.glutenproject.execution._
+import io.glutenproject.expression.ConverterUtils
 import io.glutenproject.metrics.{GlutenTimeMetric, IMetrics, NativeMetrics}
 import io.glutenproject.substrait.plan.PlanNode
-import io.glutenproject.substrait.rel.{ExtensionTableBuilder, LocalFilesBuilder, SplitInfo}
+import io.glutenproject.substrait.rel._
 import io.glutenproject.substrait.rel.LocalFilesNode.ReadFileFormat
-import io.glutenproject.utils.{LogLevelUtil, SubstraitPlanPrinterUtil}
+import io.glutenproject.utils.LogLevelUtil
 import io.glutenproject.vectorized.{CHNativeExpressionEvaluator, CloseableCHColumnBatchIterator, GeneralInIterator, GeneralOutIterator}
 
 import org.apache.spark.{InterruptibleIterator, SparkConf, SparkContext, TaskContext}
 import org.apache.spark.affinity.CHAffinity
-import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.connector.read.InputPartition
 import org.apache.spark.sql.execution.datasources.FilePartition
-import org.apache.spark.sql.execution.joins.BuildSideRelation
 import org.apache.spark.sql.execution.metric.SQLMetric
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.sql.utils.OASPackageBridge.InputMetricsWrapper
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -44,28 +43,70 @@ import java.net.URI
 import java.util.{ArrayList => JArrayList, HashMap => JHashMap, Map => JMap}
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable.ArrayBuffer
 
 class CHIteratorApi extends IteratorApi with Logging with LogLevelUtil {
 
-  /**
-   * Generate native row partition.
-   *
-   * @return
-   */
+  private def getFileSchema(schema: StructType, names: Seq[String]): StructType = {
+    val dataSchema = ArrayBuffer[StructField]()
+    schema.foreach {
+      field =>
+        // case-insensitive schema matching
+        val newField = names.find(_.equalsIgnoreCase(field.name)) match {
+          case Some(name) => StructField(name, field.dataType, field.nullable, field.metadata)
+          case _ => field
+        }
+        dataSchema += newField
+    }
+    StructType(dataSchema)
+  }
+
+  // only set file schema for text format table
+  private def setFileSchemaForLocalFiles(
+      localFilesNode: LocalFilesNode,
+      scan: BasicScanExecTransformer): Unit = {
+    if (scan.fileFormat == ReadFileFormat.TextReadFormat) {
+      val names =
+        ConverterUtils.collectAttributeNamesWithoutExprId(scan.outputAttributes())
+      localFilesNode.setFileSchema(getFileSchema(scan.getDataSchema, names.asScala))
+    }
+  }
+
   override def genSplitInfo(
       partition: InputPartition,
       partitionSchema: StructType,
-      fileFormat: ReadFileFormat): SplitInfo = {
+      fileFormat: ReadFileFormat,
+      metadataColumnNames: Seq[String]): SplitInfo = {
     partition match {
       case p: GlutenMergeTreePartition =>
+        val partLists = new JArrayList[String]()
+        val starts = new JArrayList[JLong]()
+        val lengths = new JArrayList[JLong]()
+        p.partList
+          .foreach(
+            parts => {
+              partLists.add(parts.name)
+              starts.add(parts.start)
+              lengths.add(parts.length)
+            })
         ExtensionTableBuilder
           .makeExtensionTable(
-            p.minParts,
-            p.maxParts,
+            -1L,
+            -1L,
             p.database,
             p.table,
-            p.tablePath,
-            CHAffinity.getNativeMergeTreePartitionLocations(p).toList.asJava)
+            p.relativeTablePath,
+            p.absoluteTablePath,
+            p.orderByKey,
+            p.lowCardKey,
+            p.primaryKey,
+            partLists,
+            starts,
+            lengths,
+            p.tableSchemaJson,
+            p.clickhouseTableConfigs.asJava,
+            CHAffinity.getNativeMergeTreePartitionLocations(p).toList.asJava
+          )
       case f: FilePartition =>
         val paths = new JArrayList[String]()
         val starts = new JArrayList[JLong]()
@@ -88,10 +129,50 @@ class CHIteratorApi extends IteratorApi with Logging with LogLevelUtil {
           starts,
           lengths,
           partitionColumns,
+          new JArrayList[JMap[String, String]](),
           fileFormat,
           preferredLocations.toList.asJava)
       case _ =>
-        throw new UnsupportedOperationException(s"Unsupported input partition.")
+        throw new UnsupportedOperationException(s"Unsupported input partition: $partition.")
+    }
+  }
+
+  /**
+   * Generate native row partition.
+   *
+   * @return
+   */
+  override def genPartitions(
+      wsCtx: WholeStageTransformContext,
+      splitInfos: Seq[Seq[SplitInfo]],
+      scans: Seq[BasicScanExecTransformer]): Seq[BaseGlutenPartition] = {
+    // Only serialize plan once, save lots time when plan is complex.
+    val planByteArray = wsCtx.root.toProtobuf.toByteArray
+    splitInfos.zipWithIndex.map {
+      case (splits, index) =>
+        val files = ArrayBuffer[String]()
+        val splitInfosByteArray = splits.zipWithIndex.map {
+          case (split, i) =>
+            split match {
+              case filesNode: LocalFilesNode =>
+                setFileSchemaForLocalFiles(filesNode, scans(i))
+                filesNode.setFileReadProperties(mapAsJavaMap(scans(i).getProperties))
+                filesNode.getPaths.forEach(f => files += f)
+                filesNode.toProtobuf.toByteArray
+              case extensionTableNode: ExtensionTableNode =>
+                extensionTableNode.getPartList.forEach(
+                  name => files += extensionTableNode.getAbsolutePath + "/" + name)
+                extensionTableNode.toProtobuf.toByteArray
+            }
+        }
+
+        GlutenPartition(
+          index,
+          planByteArray,
+          splitInfosByteArray.toArray,
+          locations = splits.flatMap(_.preferredLocations().asScala).toArray,
+          files.toArray
+        )
     }
   }
 
@@ -106,15 +187,28 @@ class CHIteratorApi extends IteratorApi with Logging with LogLevelUtil {
       pipelineTime: SQLMetric,
       updateInputMetrics: InputMetricsWrapper => Unit,
       updateNativeMetrics: IMetrics => Unit,
+      partitionIndex: Int,
       inputIterators: Seq[Iterator[ColumnarBatch]] = Seq()
   ): Iterator[ColumnarBatch] = {
 
+    assert(
+      inputPartition.isInstanceOf[GlutenPartition],
+      "CH backend only accepts GlutenPartition in GlutenWholeStageColumnarRDD.")
+
     val transKernel = new CHNativeExpressionEvaluator()
     val inBatchIters = new JArrayList[GeneralInIterator](inputIterators.map {
-      iter => new ColumnarNativeIterator(genCloseableColumnBatchIterator(iter).asJava)
+      iter => new ColumnarNativeIterator(CHIteratorApi.genCloseableColumnBatchIterator(iter).asJava)
     }.asJava)
+
+    val splitInfoByteArray = inputPartition
+      .asInstanceOf[GlutenPartition]
+      .splitInfosByteArray
     val resIter: GeneralOutIterator =
-      transKernel.createKernelWithBatchIterator(inputPartition.plan, inBatchIters, false)
+      transKernel.createKernelWithBatchIterator(
+        inputPartition.plan,
+        splitInfoByteArray,
+        inBatchIters,
+        false)
 
     context.addTaskCompletionListener[Unit](_ => resIter.close())
     val iter = new Iterator[Any] {
@@ -162,7 +256,7 @@ class CHIteratorApi extends IteratorApi with Logging with LogLevelUtil {
       rootNode: PlanNode,
       pipelineTime: SQLMetric,
       updateNativeMetrics: IMetrics => Unit,
-      buildRelationBatchHolder: Seq[ColumnarBatch],
+      partitionIndex: Int,
       materializeInput: Boolean): Iterator[ColumnarBatch] = {
     // scalastyle:on argcount
     GlutenConfig.getConf
@@ -170,13 +264,17 @@ class CHIteratorApi extends IteratorApi with Logging with LogLevelUtil {
     val transKernel = new CHNativeExpressionEvaluator()
     val columnarNativeIterator =
       new JArrayList[GeneralInIterator](inputIterators.map {
-        iter => new ColumnarNativeIterator(genCloseableColumnBatchIterator(iter).asJava)
+        iter =>
+          new ColumnarNativeIterator(CHIteratorApi.genCloseableColumnBatchIterator(iter).asJava)
       }.asJava)
     // we need to complete dependency RDD's firstly
     val nativeIterator = transKernel.createKernelWithBatchIterator(
       rootNode.toProtobuf.toByteArray,
+      // Final iterator does not contain scan split, so pass empty split info to native here.
+      new Array[Array[Byte]](0),
       columnarNativeIterator,
-      materializeInput)
+      materializeInput
+    )
 
     val resIter = new Iterator[ColumnarBatch] {
       private var outputRowCount = 0L
@@ -206,7 +304,6 @@ class CHIteratorApi extends IteratorApi with Logging with LogLevelUtil {
 
     def close(): Unit = {
       closed = true
-      buildRelationBatchHolder.foreach(_.close) // fixing: ref cnt goes nagative
       nativeIterator.close()
       // relationHolder.clear()
     }
@@ -215,44 +312,33 @@ class CHIteratorApi extends IteratorApi with Logging with LogLevelUtil {
     new CloseableCHColumnBatchIterator(resIter, Some(pipelineTime))
   }
 
-  /**
-   * Generate closeable ColumnBatch iterator.
-   *
-   * FIXME: This no longer overrides parent's method
-   *
-   * @param iter
-   * @return
-   */
-  def genCloseableColumnBatchIterator(iter: Iterator[ColumnarBatch]): Iterator[ColumnarBatch] = {
-    if (iter.isInstanceOf[CloseableCHColumnBatchIterator]) iter
-    else new CloseableCHColumnBatchIterator(iter)
-  }
-
   /** Generate Native FileScanRDD, currently only for ClickHouse Backend. */
   override def genNativeFileScanRDD(
       sparkContext: SparkContext,
-      wsCxt: WholeStageTransformContext,
+      wsCtx: WholeStageTransformContext,
       splitInfos: Seq[SplitInfo],
+      scan: BasicScanExecTransformer,
       numOutputRows: SQLMetric,
       numOutputBatches: SQLMetric,
       scanTime: SQLMetric): RDD[ColumnarBatch] = {
     val substraitPlanPartition = GlutenTimeMetric.withMillisTime {
+      val planByteArray = wsCtx.root.toProtobuf.toByteArray
       splitInfos.zipWithIndex.map {
         case (splitInfo, index) =>
-          wsCxt.substraitContext.initSplitInfosIndex(0)
-          wsCxt.substraitContext.setSplitInfos(Seq(splitInfo))
-          val substraitPlan = wsCxt.root.toProtobuf
-          if (index == 0) {
-            logOnLevel(
-              GlutenConfig.getConf.substraitPlanLogLevel,
-              s"The substrait plan for partition $index:\n${SubstraitPlanPrinterUtil
-                  .substraitPlanToJson(substraitPlan)}"
-            )
+          val splitInfoByteArray = splitInfo match {
+            case filesNode: LocalFilesNode =>
+              setFileSchemaForLocalFiles(filesNode, scan)
+              filesNode.setFileReadProperties(mapAsJavaMap(scan.getProperties))
+              filesNode.toProtobuf.toByteArray
+            case extensionTableNode: ExtensionTableNode =>
+              extensionTableNode.toProtobuf.toByteArray
           }
+
           GlutenPartition(
             index,
-            substraitPlan.toByteArray,
-            splitInfo.preferredLocations().asScala.toArray)
+            planByteArray,
+            Array(splitInfoByteArray),
+            locations = splitInfo.preferredLocations().asScala.toArray)
       }
     }(t => logInfo(s"Generating the Substrait plan took: $t ms."))
 
@@ -263,12 +349,15 @@ class CHIteratorApi extends IteratorApi with Logging with LogLevelUtil {
       numOutputBatches,
       scanTime)
   }
+}
 
-  /** Compute for BroadcastBuildSideRDD */
-  override def genBroadcastBuildSideIterator(
-      broadcasted: Broadcast[BuildSideRelation],
-      broadCastContext: BroadCastHashJoinContext): Iterator[ColumnarBatch] = {
-    CHBroadcastBuildSideCache.getOrBuildBroadcastHashTable(broadcasted, broadCastContext)
-    genCloseableColumnBatchIterator(Iterator.empty)
+object CHIteratorApi {
+
+  /** Generate closeable ColumnBatch iterator. */
+  def genCloseableColumnBatchIterator(iter: Iterator[ColumnarBatch]): Iterator[ColumnarBatch] = {
+    iter match {
+      case _: CloseableCHColumnBatchIterator => iter
+      case _ => new CloseableCHColumnBatchIterator(iter)
+    }
   }
 }

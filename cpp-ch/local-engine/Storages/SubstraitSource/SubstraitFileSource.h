@@ -67,8 +67,6 @@ private:
     DB::Block output_header;
 
     FormatFile::InputFormatPtr input_format;
-    std::unique_ptr<DB::QueryPipeline> pipeline;
-    std::unique_ptr<DB::PullingPipelineExecutor> reader;
 };
 
 class EmptyFileReader : public FileReaderWrapper
@@ -83,7 +81,7 @@ class ConstColumnsFileReader : public FileReaderWrapper
 {
 public:
     ConstColumnsFileReader(
-        FormatFilePtr file_, DB::ContextPtr context_, const DB::Block & header_, size_t block_size_ = DEFAULT_BLOCK_SIZE);
+        FormatFilePtr file_, DB::ContextPtr context_, const DB::Block & header_, size_t block_size_ = DB::DEFAULT_BLOCK_SIZE);
     ~ConstColumnsFileReader() override = default;
     bool pull(DB::Chunk & chunk) override;
 
@@ -102,7 +100,7 @@ public:
 
     String getName() const override { return "SubstraitFileSource"; }
 
-    void setKeyCondition(const DB::ActionsDAG::NodeRawConstPtrs & nodes, DB::ContextPtr context_) override;
+    void setKeyCondition(const DB::ActionsDAGPtr & filter_actions_dag, DB::ContextPtr context_) override;
 
 protected:
     DB::Chunk generate() override;

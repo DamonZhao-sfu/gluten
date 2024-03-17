@@ -41,8 +41,11 @@ class SubstraitParser {
       const ::substrait::NamedStruct& namedStruct,
       bool asLowerCase = false);
 
-  /// Used to parse partition columns from Substrait NamedStruct.
-  static std::vector<bool> parsePartitionColumns(const ::substrait::NamedStruct& namedStruct);
+  /// Used to parse partition & metadata columns from Substrait NamedStruct.
+  static void parsePartitionAndMetadataColumns(
+      const ::substrait::NamedStruct& namedStruct,
+      std::vector<bool>& isPartitionColumns,
+      std::vector<bool>& isMetadataColumns);
 
   /// Parse Substrait Type to Velox type.
   static facebook::velox::TypePtr parseType(const ::substrait::Type& substraitType, bool asLowerCase = false);
@@ -91,6 +94,10 @@ class SubstraitParser {
 
   /// Extract input types from Substrait function signature.
   static std::vector<facebook::velox::TypePtr> sigToTypes(const std::string& functionSig);
+
+  // Get values for the different supported types.
+  template <typename T>
+  static T getLiteralValue(const ::substrait::Expression::Literal& /* literal */);
 
  private:
   /// A map used for mapping Substrait function keywords into Velox functions'

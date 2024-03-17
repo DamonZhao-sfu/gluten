@@ -18,11 +18,13 @@
 #pragma once
 
 #include <arrow/c/abi.h>
+#include <glog/logging.h>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <thread>
 #include <utility>
+
 #include "benchmark/benchmark.h"
 #include "substrait/SubstraitToVeloxPlan.h"
 
@@ -36,7 +38,7 @@
 
 DECLARE_bool(print_result);
 DECLARE_string(write_file);
-DECLARE_string(batch_size);
+DECLARE_int64(batch_size);
 DECLARE_int32(cpu);
 DECLARE_int32(threads);
 DECLARE_int32(iterations);
@@ -70,7 +72,7 @@ inline std::string getGeneratedFilePath(const std::string& fileName) {
 }
 
 /// Read binary data from a json file.
-std::string getPlanFromFile(const std::string& filePath);
+std::string getPlanFromFile(const std::string& type, const std::string& filePath);
 
 /// Get the file paths, starts, lengths from a directory.
 /// Use fileFormat to specify the format to read, eg., orc, parquet.
@@ -86,10 +88,7 @@ void abortIfFileNotExists(const std::string& filepath);
 inline std::shared_ptr<gluten::ColumnarBatch> convertBatch(std::shared_ptr<gluten::ColumnarBatch> cb) {
   if (cb->getType() != "velox") {
     auto vp = facebook::velox::importFromArrowAsOwner(
-        *cb->exportArrowSchema(),
-        *cb->exportArrowArray(),
-        gluten::ArrowUtils::getBridgeOptions(),
-        gluten::defaultLeafVeloxMemoryPool().get());
+        *cb->exportArrowSchema(), *cb->exportArrowArray(), gluten::defaultLeafVeloxMemoryPool().get());
     return std::make_shared<gluten::VeloxColumnarBatch>(std::dynamic_pointer_cast<facebook::velox::RowVector>(vp));
   } else {
     return cb;
@@ -101,4 +100,7 @@ bool endsWith(const std::string& data, const std::string& suffix);
 
 void setCpu(uint32_t cpuindex);
 
-arrow::Status setLocalDirsAndDataFileFromEnv(gluten::ShuffleWriterOptions& options);
+arrow::Status
+setLocalDirsAndDataFileFromEnv(std::string& dataFile, std::vector<std::string>& localDirs, bool& isFromEnv);
+
+void cleanupShuffleOutput(const std::string& dataFile, const std::vector<std::string>& localDirs, bool isFromEnv);

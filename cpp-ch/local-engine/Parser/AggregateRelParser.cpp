@@ -30,6 +30,7 @@
 #include <Processors/QueryPlan/AggregatingStep.h>
 #include <Processors/QueryPlan/ExpressionStep.h>
 #include <Processors/QueryPlan/MergingAggregatedStep.h>
+#include <Common/CHUtil.h>
 #include "Common/PODArray.h"
 #include <Common/StringUtils/StringUtils.h>
 
@@ -62,6 +63,13 @@ DB::QueryPlanPtr AggregateRelParser::parse(DB::QueryPlanPtr query_plan, const su
         addPostProjection();
         LOG_TRACE(logger, "header after post-projection is: {}", plan->getCurrentDataStream().header.dumpStructure());
     }
+    else if (has_complete_stage)
+    {
+        addCompleteModeAggregatedStep();
+        LOG_TRACE(logger, "header after complete aggregate is: {}", plan->getCurrentDataStream().header.dumpStructure());
+        addPostProjection();
+        LOG_TRACE(logger, "header after post-projection is: {}", plan->getCurrentDataStream().header.dumpStructure());
+    }
     else
     {
         addAggregatingStep();
@@ -70,7 +78,7 @@ DB::QueryPlanPtr AggregateRelParser::parse(DB::QueryPlanPtr query_plan, const su
 
     /// If the groupings is empty, we still need to return one row with default values even if the input is empty.
     if ((rel.aggregate().groupings().empty() || rel.aggregate().groupings()[0].grouping_expressions().empty())
-        && (has_final_stage || rel.aggregate().measures().empty()))
+        && (has_final_stage || has_complete_stage || rel.aggregate().measures().empty()))
     {
         LOG_TRACE(&Poco::Logger::get("AggregateRelParser"), "default aggregate result step");
         auto default_agg_result = std::make_unique<DefaultHashAggregateResultStep>(plan->getCurrentDataStream());
@@ -95,11 +103,25 @@ void AggregateRelParser::setup(DB::QueryPlanPtr query_plan, const substrait::Rel
     has_first_stage = phase_set.contains(substrait::AggregationPhase::AGGREGATION_PHASE_INITIAL_TO_INTERMEDIATE);
     has_inter_stage = phase_set.contains(substrait::AggregationPhase::AGGREGATION_PHASE_INTERMEDIATE_TO_INTERMEDIATE);
     has_final_stage = phase_set.contains(substrait::AggregationPhase::AGGREGATION_PHASE_INTERMEDIATE_TO_RESULT);
+    has_complete_stage = phase_set.contains(substrait::AggregationPhase::AGGREGATION_PHASE_INITIAL_TO_RESULT);
+    if (aggregate_rel->measures().empty())
+    {
+        /// According to planAggregateWithoutDistinct in AggUtils.scala, an aggregate without aggregate
+        /// functions will only be organized in two stages, partial and final. In partial stage
+        /// requiredChildDistributionExpressions is None, but in final stage it is Some(Seq[Expression]).
+        auto configs = parseFormattedRelAdvancedOptimization(aggregate_rel->advanced_extension());
+        has_final_stage = getStringConfig(configs, "has_required_child_distribution_expressions") == "true";
+    }
 
     if (phase_set.size() > 1 && has_final_stage)
     {
         throw DB::Exception(
             DB::ErrorCodes::LOGICAL_ERROR, "AggregateRelParser: multiple aggregation phases with final stage are not supported");
+    }
+    if (phase_set.size() > 1 && has_complete_stage)
+    {
+        throw DB::Exception(
+            DB::ErrorCodes::LOGICAL_ERROR, "AggregateRelParser: multiple aggregation phases with complete mode are not supported");
     }
 
     auto input_header = plan->getCurrentDataStream().header;
@@ -173,7 +195,7 @@ void AggregateRelParser::buildAggregateDescriptions(AggregateDescriptions & desc
 {
     auto build_result_column_name = [](const String & function_name, const Strings & arg_column_names, substrait::AggregationPhase phase)
     {
-        if (phase != substrait::AggregationPhase::AGGREGATION_PHASE_INITIAL_TO_INTERMEDIATE)
+        if (phase == substrait::AggregationPhase::AGGREGATION_PHASE_INTERMEDIATE_TO_RESULT)
         {
             assert(arg_column_names.size() == 1);
             return arg_column_names[0];
@@ -186,6 +208,7 @@ void AggregateRelParser::buildAggregateDescriptions(AggregateDescriptions & desc
         AggregateDescription description;
         const auto & measure = agg_info.measure->measure();
         description.column_name = build_result_column_name(agg_info.function_name, agg_info.arg_column_names, measure.phase());
+        agg_info.measure_column_name = description.column_name;
         description.argument_names = agg_info.arg_column_names;
         DB::AggregateFunctionProperties properties;
 
@@ -200,9 +223,9 @@ void AggregateRelParser::buildAggregateDescriptions(AggregateDescriptions & desc
         else
         {
             // If the function is a state function, we don't need to apply `PartialMerge`.
-            // In INITIAL_TO_INTERMEDIATE phase, we do arguments -> xxState.
+            // In INITIAL_TO_INTERMEDIATE or INITIAL_TO_RESULT phase, we do arguments -> xxState.
             // In INTERMEDIATE_TO_RESULT phase, we do xxState -> xxState.
-            if (agg_info.parser_func_info.phase == substrait::AggregationPhase::AGGREGATION_PHASE_INITIAL_TO_INTERMEDIATE)
+            if (agg_info.parser_func_info.phase == substrait::AggregationPhase::AGGREGATION_PHASE_INITIAL_TO_INTERMEDIATE || agg_info.parser_func_info.phase == substrait::AggregationPhase::AGGREGATION_PHASE_INITIAL_TO_RESULT)
             {
                 description.function = getAggregateFunction(agg_info.function_name, agg_info.arg_column_types, properties, agg_info.params);
             }
@@ -237,11 +260,18 @@ void AggregateRelParser::addMergingAggregatedStep()
     AggregateDescriptions aggregate_descriptions;
     buildAggregateDescriptions(aggregate_descriptions);
     auto settings = getContext()->getSettingsRef();
-    Aggregator::Params params(grouping_keys, aggregate_descriptions, false, settings.max_threads, settings.max_block_size);
-    bool enable_streaming_aggregating = getContext()->getConfigRef().getBool("enable_streaming_aggregating", false);
+    Aggregator::Params params(
+        grouping_keys,
+        aggregate_descriptions,
+        false,
+        settings.max_threads,
+        PODArrayUtil::adjustMemoryEfficientSize(settings.max_block_size),
+        settings.min_hit_rate_to_use_consecutive_keys_optimization);
+    bool enable_streaming_aggregating = getContext()->getConfigRef().getBool("enable_streaming_aggregating", true);
     if (enable_streaming_aggregating)
     {
-        auto merging_step = std::make_unique<GraceMergingAggregatedStep>(getContext(), plan->getCurrentDataStream(), params);
+        params.group_by_two_level_threshold = settings.group_by_two_level_threshold;
+        auto merging_step = std::make_unique<GraceMergingAggregatedStep>(getContext(), plan->getCurrentDataStream(), params, false);
         steps.emplace_back(merging_step.get());
         plan->addStep(std::move(merging_step));
     }
@@ -264,16 +294,14 @@ void AggregateRelParser::addMergingAggregatedStep()
     }
 }
 
-void AggregateRelParser::addAggregatingStep()
+void AggregateRelParser::addCompleteModeAggregatedStep()
 {
     AggregateDescriptions aggregate_descriptions;
     buildAggregateDescriptions(aggregate_descriptions);
     auto settings = getContext()->getSettingsRef();
-    bool enable_streaming_aggregating = getContext()->getConfigRef().getBool("enable_streaming_aggregating", false);
-
+    bool enable_streaming_aggregating = getContext()->getConfigRef().getBool("enable_streaming_aggregating", true);
     if (enable_streaming_aggregating)
     {
-        // Disable spilling to disk.
         Aggregator::Params params(
             grouping_keys,
             aggregate_descriptions,
@@ -282,6 +310,91 @@ void AggregateRelParser::addAggregatingStep()
             settings.group_by_overflow_mode,
             settings.group_by_two_level_threshold,
             settings.group_by_two_level_threshold_bytes,
+            settings.max_bytes_before_external_group_by,
+            settings.empty_result_for_aggregation_by_empty_set,
+            getContext()->getTempDataOnDisk(),
+            settings.max_threads,
+            settings.min_free_disk_space_for_temporary_data,
+            true,
+            3,
+            PODArrayUtil::adjustMemoryEfficientSize(settings.max_block_size),
+            /*enable_prefetch*/ true,
+            /*only_merge*/ false,
+            settings.optimize_group_by_constant_keys,
+            settings.min_hit_rate_to_use_consecutive_keys_optimization,
+            /*StatsCollectingParams*/{});
+        auto merging_step = std::make_unique<GraceMergingAggregatedStep>(getContext(), plan->getCurrentDataStream(), params, true);
+        steps.emplace_back(merging_step.get());
+        plan->addStep(std::move(merging_step));
+    }
+    else
+    {
+        Aggregator::Params params(
+            grouping_keys,
+            aggregate_descriptions,
+            false,
+            settings.max_rows_to_group_by,
+            settings.group_by_overflow_mode,
+            settings.group_by_two_level_threshold,
+            settings.group_by_two_level_threshold_bytes,
+            settings.max_bytes_before_external_group_by,
+            settings.empty_result_for_aggregation_by_empty_set,
+            getContext()->getTempDataOnDisk(),
+            settings.max_threads,
+            settings.min_free_disk_space_for_temporary_data,
+            true,
+            3,
+            PODArrayUtil::adjustMemoryEfficientSize(settings.max_block_size),
+            /*enable_prefetch*/ true,
+            /*only_merge*/ false,
+            settings.optimize_group_by_constant_keys,
+            settings.min_hit_rate_to_use_consecutive_keys_optimization,
+            /*StatsCollectingParams*/{});
+
+        auto aggregating_step = std::make_unique<AggregatingStep>(
+            plan->getCurrentDataStream(),
+            params,
+            GroupingSetsParamsList(),
+            true,
+            settings.max_block_size,
+            settings.aggregation_in_order_max_block_bytes,
+            1,
+            1,
+            false,
+            false,
+            SortDescription(),
+            SortDescription(),
+            false,
+            false,
+            false);
+        steps.emplace_back(aggregating_step.get());
+        plan->addStep(std::move(aggregating_step));
+    }
+}
+
+void AggregateRelParser::addAggregatingStep()
+{
+    AggregateDescriptions aggregate_descriptions;
+    buildAggregateDescriptions(aggregate_descriptions);
+    auto settings = getContext()->getSettingsRef();
+    bool enable_streaming_aggregating = getContext()->getConfigRef().getBool("enable_streaming_aggregating", true);
+
+    if (enable_streaming_aggregating)
+    {
+        // Disable spilling to disk.
+        // If group_by_two_level_threshold_bytes != 0, `Aggregator` will use memory usage as a condition to convert
+        // the hash table into a two level one. The method of determining the amount of memory used by the hash table is
+        // unreliable. It will appear that a small hash table is converted into a two level structure, resulting in a
+        // lot of small blocks. So we disable this condition, reamain `group_by_two_level_threshold` as the condition to
+        // convert a single level hash table into a two level one.
+        Aggregator::Params params(
+            grouping_keys,
+            aggregate_descriptions,
+            false,
+            settings.max_rows_to_group_by,
+            settings.group_by_overflow_mode,
+            settings.group_by_two_level_threshold,
+            0, // group_by_two_level_threshold_bytes
             0,
             settings.empty_result_for_aggregation_by_empty_set,
             nullptr,
@@ -289,10 +402,12 @@ void AggregateRelParser::addAggregatingStep()
             settings.min_free_disk_space_for_temporary_data,
             true,
             3,
-            settings.max_block_size,
+            PODArrayUtil::adjustMemoryEfficientSize(settings.max_block_size),
             /*enable_prefetch*/ true,
             /*only_merge*/ false,
-            settings.optimize_group_by_constant_keys);
+            settings.optimize_group_by_constant_keys,
+            settings.min_hit_rate_to_use_consecutive_keys_optimization,
+            /*StatsCollectingParams*/{});
         auto aggregating_step = std::make_unique<StreamingAggregatingStep>(getContext(), plan->getCurrentDataStream(), params);
         steps.emplace_back(aggregating_step.get());
         plan->addStep(std::move(aggregating_step));
@@ -314,10 +429,12 @@ void AggregateRelParser::addAggregatingStep()
             settings.min_free_disk_space_for_temporary_data,
             true,
             3,
-            settings.max_block_size,
+            PODArrayUtil::adjustMemoryEfficientSize(settings.max_block_size),
             /*enable_prefetch*/ true,
             /*only_merge*/ false,
-            settings.optimize_group_by_constant_keys);
+            settings.optimize_group_by_constant_keys,
+            settings.min_hit_rate_to_use_consecutive_keys_optimization,
+            /*StatsCollectingParams*/{});
 
         auto aggregating_step = std::make_unique<AggregatingStep>(
             plan->getCurrentDataStream(),
@@ -346,13 +463,33 @@ void AggregateRelParser::addPostProjection()
     auto input_header = plan->getCurrentDataStream().header;
     ActionsDAGPtr project_actions_dag = std::make_shared<ActionsDAG>(input_header.getColumnsWithTypeAndName());
     auto dag_footprint = project_actions_dag->dumpDAG();
-    for (const auto & agg_info : aggregates)
+
+    if (has_final_stage)
     {
-        /// For final stage, the aggregate function's input is only one intermediate result columns.
-        /// The final result columm's position is the same as the intermediate result column's position.
-        auto pos = agg_info.measure->measure().arguments(0).value().selection().direct_reference().struct_field().field();
-        const auto * agg_result_node = project_actions_dag->getInputs()[pos];
-        agg_info.function_parser->convertNodeTypeIfNeeded(agg_info.parser_func_info, agg_result_node, project_actions_dag);
+        for (const auto & agg_info : aggregates)
+        {
+            for (const auto * input_node : project_actions_dag->getInputs())
+            {
+                if (input_node->result_name == agg_info.measure_column_name)
+                {
+                    agg_info.function_parser->convertNodeTypeIfNeeded(agg_info.parser_func_info, input_node, project_actions_dag, false);
+                }
+            }
+        }
+    }
+    else if (has_complete_stage)
+    {
+        // on the complete mode, it must consider the nullability when converting node type
+        for (const auto & agg_info : aggregates)
+        {
+            for (const auto * output_node : project_actions_dag->getOutputs())
+            {
+                if (output_node->result_name == agg_info.measure_column_name)
+                {
+                    agg_info.function_parser->convertNodeTypeIfNeeded(agg_info.parser_func_info, output_node, project_actions_dag, true);
+                }
+            }
+        }
     }
     if (project_actions_dag->dumpDAG() != dag_footprint)
     {

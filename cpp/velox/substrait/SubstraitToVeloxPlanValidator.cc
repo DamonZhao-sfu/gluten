@@ -29,6 +29,28 @@
 namespace gluten {
 
 namespace {
+static const char* extractFileName(const char* file) {
+  return strrchr(file, '/') ? strrchr(file, '/') + 1 : file;
+}
+
+#define LOG_VALIDATION_MSG_FROM_EXCEPTION(err)                                                                                        \
+  logValidateMsg(fmt::format(                                                                                                         \
+      "Validation failed due to exception caught at file:{} line:{} function:{}, thrown from file:{} line:{} function:{}, reason:{}", \
+      extractFileName(__FILE__),                                                                                                      \
+      __LINE__,                                                                                                                       \
+      __FUNCTION__,                                                                                                                   \
+      extractFileName(err.file()),                                                                                                    \
+      err.line(),                                                                                                                     \
+      err.function(),                                                                                                                 \
+      err.message()))
+
+#define LOG_VALIDATION_MSG(reason)                                     \
+  logValidateMsg(fmt::format(                                          \
+      "Validation failed at file:{}, line:{}, function:{}, reason:{}", \
+      extractFileName(__FILE__),                                       \
+      __LINE__,                                                        \
+      __FUNCTION__,                                                    \
+      reason))
 
 static const std::unordered_set<std::string> kRegexFunctions = {
     "regexp_extract",
@@ -42,13 +64,12 @@ static const std::unordered_set<std::string> kBlackList = {
     "concat_ws",
     "from_json",
     "json_array_length",
-    "from_unixtime",
     "repeat",
     "trunc",
     "sequence",
-    "posexplode",
     "arrays_overlap",
-    "approx_percentile"};
+    "approx_percentile",
+    "get_array_struct_fields"};
 
 } // namespace
 
@@ -57,17 +78,17 @@ bool SubstraitToVeloxPlanValidator::validateInputTypes(
     std::vector<TypePtr>& types) {
   // The input type is wrapped in enhancement.
   if (!extension.has_enhancement()) {
-    logValidateMsg("native validation failed due to: {input type is not wrapped in enhancement}.");
+    LOG_VALIDATION_MSG("Input type is not wrapped in enhancement.");
     return false;
   }
   const auto& enhancement = extension.enhancement();
   ::substrait::Type inputType;
   if (!enhancement.UnpackTo(&inputType)) {
-    logValidateMsg("native validation failed due to: {enhancement can't be unpacked to inputType}.");
+    LOG_VALIDATION_MSG("Enhancement can't be unpacked to inputType.");
     return false;
   }
   if (!inputType.has_struct_()) {
-    logValidateMsg("native validation failed due to: {input type has no struct}.");
+    LOG_VALIDATION_MSG("Input type has no struct.");
     return false;
   }
 
@@ -77,7 +98,7 @@ bool SubstraitToVeloxPlanValidator::validateInputTypes(
     try {
       types.emplace_back(SubstraitParser::parseType(sType));
     } catch (const VeloxException& err) {
-      logValidateMsg("native validation failed due to: Type is not supported, " + err.message());
+      LOG_VALIDATION_MSG_FROM_EXCEPTION(err);
       return false;
     }
   }
@@ -93,7 +114,7 @@ bool SubstraitToVeloxPlanValidator::validateRound(
   }
 
   if (!arguments[1].value().has_literal()) {
-    logValidateMsg("native validation failued due to: Round scale is expected.");
+    LOG_VALIDATION_MSG("Round scale is expected.");
     return false;
   }
 
@@ -105,16 +126,14 @@ bool SubstraitToVeloxPlanValidator::validateRound(
     case ::substrait::Expression_Literal::LiteralTypeCase::kI64:
       return (arguments[1].value().literal().i64() >= 0);
     default:
-      logValidateMsg(
-          "native validation failed due to: Round scale validation is not supported for type case " +
-          std::to_string(typeCase));
+      LOG_VALIDATION_MSG("Round scale validation is not supported for type case " + std::to_string(typeCase));
       return false;
   }
 }
 
 bool SubstraitToVeloxPlanValidator::validateExtractExpr(const std::vector<core::TypedExprPtr>& params) {
   if (params.size() != 2) {
-    logValidateMsg("native validation failed due to: Value expected in variant in ExtractExpr.");
+    LOG_VALIDATION_MSG("Value expected in variant in ExtractExpr.");
     return false;
   }
 
@@ -123,20 +142,13 @@ bool SubstraitToVeloxPlanValidator::validateExtractExpr(const std::vector<core::
     // Get the function argument.
     const auto& variant = functionArg->value();
     if (!variant.hasValue()) {
-      logValidateMsg("native validation failed due to: Value expected in variant in ExtractExpr.");
+      LOG_VALIDATION_MSG("Value expected in variant in ExtractExpr.");
       return false;
     }
 
-    // The first parameter specifies extracting from which field.
-    const auto& from = variant.value<std::string>();
-    // Hour causes incorrect result.
-    if (from == "HOUR") {
-      logValidateMsg("native validation failed due to: {extract from hour}.");
-      return false;
-    }
     return true;
   }
-  logValidateMsg("native validation failed due to: Constant is expected to be the first parameter in extract.");
+  LOG_VALIDATION_MSG("Constant is expected to be the first parameter in extract.");
   return false;
 }
 
@@ -144,19 +156,19 @@ bool SubstraitToVeloxPlanValidator::validateRegexExpr(
     const std::string& name,
     const ::substrait::Expression::ScalarFunction& scalarFunction) {
   if (scalarFunction.arguments().size() < 2) {
-    logValidateMsg("native validation failed due to: wrong number of arguments for " + name);
+    LOG_VALIDATION_MSG("Wrong number of arguments for " + name);
   }
 
   const auto& patternArg = scalarFunction.arguments()[1].value();
   if (!patternArg.has_literal() || !patternArg.literal().has_string()) {
-    logValidateMsg("native validation failed due to: pattern is not string literal for " + name);
+    LOG_VALIDATION_MSG("Pattern is not string literal for " + name);
     return false;
   }
 
   const auto& pattern = patternArg.literal().string();
   std::string error;
   if (!validatePattern(pattern, error)) {
-    logValidateMsg("native validation failed for function: " + name + " due to: " + error);
+    LOG_VALIDATION_MSG(name + " due to " + error);
     return false;
   }
   return true;
@@ -186,20 +198,20 @@ bool SubstraitToVeloxPlanValidator::validateScalarFunction(
   } else if (name == "char_length") {
     VELOX_CHECK(types.size() == 1);
     if (types[0] == "vbin") {
-      logValidateMsg("native validation failed due to: Binary type is not supported in " + name);
+      LOG_VALIDATION_MSG("Binary type is not supported in " + name);
       return false;
     }
   } else if (name == "map_from_arrays") {
-    logValidateMsg("native validation failed due to: map_from_arrays is not supported.");
+    LOG_VALIDATION_MSG("map_from_arrays is not supported.");
     return false;
   } else if (name == "get_array_item") {
-    logValidateMsg("native validation failed due to: get_array_item is not supported.");
+    LOG_VALIDATION_MSG("get_array_item is not supported.");
     return false;
   } else if (name == "concat") {
     for (const auto& type : types) {
       if (type.find("struct") != std::string::npos || type.find("map") != std::string::npos ||
           type.find("list") != std::string::npos) {
-        logValidateMsg("native validation failed due to: " + type + "is not supported in concat.");
+        LOG_VALIDATION_MSG(type + " is not supported in concat.");
         return false;
       }
     }
@@ -207,7 +219,7 @@ bool SubstraitToVeloxPlanValidator::validateScalarFunction(
     for (const auto& type : types) {
       if (type.find("struct") != std::string::npos || type.find("map") != std::string::npos ||
           type.find("list") != std::string::npos) {
-        logValidateMsg("native validation failed due to: " + type + "is not supported in murmur3hash.");
+        LOG_VALIDATION_MSG(type + " is not supported in murmur3hash.");
         return false;
       }
     }
@@ -219,7 +231,7 @@ bool SubstraitToVeloxPlanValidator::validateScalarFunction(
   }
 
   if (kBlackList.find(name) != kBlackList.end()) {
-    logValidateMsg("native validation failed due to: Function is not supported: " + name);
+    LOG_VALIDATION_MSG("Function is not supported: " + name);
     return false;
   }
 
@@ -230,27 +242,17 @@ bool SubstraitToVeloxPlanValidator::validateLiteral(
     const ::substrait::Expression_Literal& literal,
     const RowTypePtr& inputType) {
   if (literal.has_list()) {
-    if (literal.list().values_size() == 0) {
-      logValidateMsg("native validation failed due to: literal is a list but has no value.");
-      return false;
-    } else {
-      for (auto child : literal.list().values()) {
-        if (!validateLiteral(child, inputType)) {
-          // the error msg has been set, so do not need to set it again.
-          return false;
-        }
+    for (auto child : literal.list().values()) {
+      if (!validateLiteral(child, inputType)) {
+        // the error msg has been set, so do not need to set it again.
+        return false;
       }
     }
   } else if (literal.has_map()) {
-    if (literal.map().key_values().empty()) {
-      logValidateMsg("native validation failed due to: literal is a map but has no value.");
-      return false;
-    } else {
-      for (auto child : literal.map().key_values()) {
-        if (!validateLiteral(child.key(), inputType) || !validateLiteral(child.value(), inputType)) {
-          // the error msg has been set, so do not need to set it again.
-          return false;
-        }
+    for (auto child : literal.map().key_values()) {
+      if (!validateLiteral(child.key(), inputType) || !validateLiteral(child.value(), inputType)) {
+        // the error msg has been set, so do not need to set it again.
+        return false;
       }
     }
   }
@@ -266,7 +268,7 @@ bool SubstraitToVeloxPlanValidator::validateCast(
 
   const auto& toType = SubstraitParser::parseType(castExpr.type());
   if (toType->kind() == TypeKind::TIMESTAMP) {
-    logValidateMsg("native validation failed due to: Casting to TIMESTAMP is not supported.");
+    LOG_VALIDATION_MSG("Casting to TIMESTAMP is not supported.");
     return false;
   }
 
@@ -275,12 +277,11 @@ bool SubstraitToVeloxPlanValidator::validateCast(
   // Casting from some types is not supported. See CastExpr::applyCast.
   if (input->type()->isDate()) {
     if (toType->kind() == TypeKind::TIMESTAMP) {
-      logValidateMsg("native validation failed due to: Casting from DATE to TIMESTAMP is not supported.");
+      LOG_VALIDATION_MSG("Casting from DATE to TIMESTAMP is not supported.");
       return false;
     }
     if (toType->kind() != TypeKind::VARCHAR) {
-      logValidateMsg(fmt::format(
-          "native validation failed due to: Casting from DATE to {} is not supported.", toType->toString()));
+      LOG_VALIDATION_MSG("Casting from DATE to " + toType->toString() + " is not supported.");
       return false;
     }
   }
@@ -289,11 +290,10 @@ bool SubstraitToVeloxPlanValidator::validateCast(
     case TypeKind::MAP:
     case TypeKind::ROW:
     case TypeKind::VARBINARY:
-      logValidateMsg("native validation failed due to: Invalid input type in casting: ARRAY/MAP/ROW/VARBINARY");
+      LOG_VALIDATION_MSG("Invalid input type in casting: ARRAY/MAP/ROW/VARBINARY.");
       return false;
     case TypeKind::TIMESTAMP: {
-      logValidateMsg(
-          "native validation failed due to: Casting from TIMESTAMP is not supported or has incorrect result.");
+      LOG_VALIDATION_MSG("Casting from TIMESTAMP is not supported or has incorrect result.");
       return false;
     }
     default: {
@@ -305,10 +305,26 @@ bool SubstraitToVeloxPlanValidator::validateCast(
 bool SubstraitToVeloxPlanValidator::validateIfThen(
     const ::substrait::Expression_IfThen& ifThen,
     const RowTypePtr& inputType) {
-  for (const auto& ifThen : ifThen.ifs()) {
-    return validateExpression(ifThen.if_(), inputType) && validateExpression(ifThen.then(), inputType);
+  for (const auto& subIfThen : ifThen.ifs()) {
+    return validateExpression(subIfThen.if_(), inputType) && validateExpression(subIfThen.then(), inputType);
   }
   return true;
+}
+
+bool SubstraitToVeloxPlanValidator::validateSingularOrList(
+    const ::substrait::Expression::SingularOrList& singularOrList,
+    const RowTypePtr& inputType) {
+  for (const auto& option : singularOrList.options()) {
+    if (!option.has_literal()) {
+      LOG_VALIDATION_MSG("Option is expected as Literal.");
+      return false;
+    }
+    if (!validateLiteral(option.literal(), inputType)) {
+      return false;
+    }
+  }
+
+  return validateExpression(singularOrList.value(), inputType);
 }
 
 bool SubstraitToVeloxPlanValidator::validateExpression(
@@ -324,9 +340,57 @@ bool SubstraitToVeloxPlanValidator::validateExpression(
       return validateCast(expression.cast(), inputType);
     case ::substrait::Expression::RexTypeCase::kIfThen:
       return validateIfThen(expression.if_then(), inputType);
+    case ::substrait::Expression::RexTypeCase::kSingularOrList:
+      return validateSingularOrList(expression.singular_or_list(), inputType);
     default:
       return true;
   }
+}
+
+bool SubstraitToVeloxPlanValidator::validate(const ::substrait::WriteRel& writeRel) {
+  if (writeRel.has_input() && !validate(writeRel.input())) {
+    LOG_VALIDATION_MSG("Validation failed for input type validation in WriteRel.");
+    return false;
+  }
+
+  // Validate input data type.
+  std::vector<TypePtr> types;
+  if (writeRel.has_named_table()) {
+    const auto& extension = writeRel.named_table().advanced_extension();
+    if (!validateInputTypes(extension, types)) {
+      LOG_VALIDATION_MSG("Validation failed for input type validation in WriteRel.");
+      return false;
+    }
+  }
+
+  // Validate partition key type.
+  if (writeRel.has_table_schema()) {
+    const auto& tableSchema = writeRel.table_schema();
+    std::vector<bool> isMetadataColumns;
+    std::vector<bool> isPartitionColumns;
+    SubstraitParser::parsePartitionAndMetadataColumns(tableSchema, isPartitionColumns, isMetadataColumns);
+    for (auto i = 0; i < types.size(); i++) {
+      if (isPartitionColumns[i]) {
+        switch (types[i]->kind()) {
+          case TypeKind::BOOLEAN:
+          case TypeKind::TINYINT:
+          case TypeKind::SMALLINT:
+          case TypeKind::INTEGER:
+          case TypeKind::BIGINT:
+          case TypeKind::VARCHAR:
+          case TypeKind::VARBINARY:
+            break;
+          default:
+            LOG_VALIDATION_MSG(
+                "Validation failed for input type validation in WriteRel, not support partition column type: " +
+                mapTypeKindToName(types[i]->kind()));
+            return false;
+        }
+      }
+    }
+  }
+
+  return true;
 }
 
 bool SubstraitToVeloxPlanValidator::validate(const ::substrait::FetchRel& fetchRel) {
@@ -336,7 +400,7 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::FetchRel& fetchR
     const auto& extension = fetchRel.advanced_extension();
     std::vector<TypePtr> types;
     if (!validateInputTypes(extension, types)) {
-      logValidateMsg("native validation failed due to: unsupported input types in ExpandRel.");
+      LOG_VALIDATION_MSG("Unsupported input types in ExpandRel.");
       return false;
     }
 
@@ -350,7 +414,7 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::FetchRel& fetchR
   }
 
   if (fetchRel.offset() < 0 || fetchRel.count() < 0) {
-    logValidateMsg("native validation failed due to: Offset and count should be valid in FetchRel.");
+    LOG_VALIDATION_MSG("Offset and count should be valid in FetchRel.");
     return false;
   }
 
@@ -365,8 +429,8 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::FetchRel& fetchR
       for (const auto& sortingKey : sortingKeys) {
         auto result = sortingKeyNames.insert(sortingKey->name());
         if (!result.second) {
-          logValidateMsg(
-              "native validation failed due to: if the input of fetchRel is a SortRel, we will convert it to a TopNNode. In Velox, it is important to ensure unique sorting keys. However, duplicate keys were found in this case.");
+          LOG_VALIDATION_MSG(
+              "If the input of fetchRel is a SortRel, we will convert it to a TopNNode. In Velox, it is important to ensure unique sorting keys. However, duplicate keys were found in this case.");
           return false;
         }
       }
@@ -378,19 +442,19 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::FetchRel& fetchR
 
 bool SubstraitToVeloxPlanValidator::validate(const ::substrait::GenerateRel& generateRel) {
   if (generateRel.has_input() && !validate(generateRel.input())) {
-    logValidateMsg("native validation failed due to: input validation fails in GenerateRel.");
+    LOG_VALIDATION_MSG("Input validation fails in GenerateRel.");
     return false;
   }
 
   // Get and validate the input types from extension.
   if (!generateRel.has_advanced_extension()) {
-    logValidateMsg("native validation failed due to: Input types are expected in GenerateRel.");
+    LOG_VALIDATION_MSG("Input types are expected in GenerateRel.");
     return false;
   }
   const auto& extension = generateRel.advanced_extension();
   std::vector<TypePtr> types;
   if (!validateInputTypes(extension, types)) {
-    logValidateMsg("native validation failed due to: Validation failed for input types in GenerateRel.");
+    LOG_VALIDATION_MSG("Validation failed for input types in GenerateRel.");
     return false;
   }
 
@@ -404,7 +468,7 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::GenerateRel& gen
   auto rowType = std::make_shared<RowType>(std::move(names), std::move(types));
 
   if (generateRel.has_generator() && !validateExpression(generateRel.generator(), rowType)) {
-    logValidateMsg("native validation failed due to: input validation fails in GenerateRel.");
+    LOG_VALIDATION_MSG("Input validation fails in GenerateRel.");
     return false;
   }
   return true;
@@ -412,7 +476,7 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::GenerateRel& gen
 
 bool SubstraitToVeloxPlanValidator::validate(const ::substrait::ExpandRel& expandRel) {
   if (expandRel.has_input() && !validate(expandRel.input())) {
-    logValidateMsg("native validation failed due to: input validation fails in ExpandRel.");
+    LOG_VALIDATION_MSG("Input validation fails in ExpandRel.");
     return false;
   }
   RowTypePtr rowType = nullptr;
@@ -421,7 +485,7 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::ExpandRel& expan
     const auto& extension = expandRel.advanced_extension();
     std::vector<TypePtr> types;
     if (!validateInputTypes(extension, types)) {
-      logValidateMsg("native validation failed due to: unsupported input types in ExpandRel.");
+      LOG_VALIDATION_MSG("Unsupported input types in ExpandRel.");
       return false;
     }
 
@@ -444,8 +508,7 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::ExpandRel& expan
       if (projectSize == 0) {
         projectSize = projectExprs.size();
       } else if (projectSize != projectExprs.size()) {
-        logValidateMsg(
-            "native validation failed due to: SwitchingField expressions size should be constant in ExpandRel.");
+        LOG_VALIDATION_MSG("SwitchingField expressions size should be constant in ExpandRel.");
         return false;
       }
 
@@ -457,8 +520,7 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::ExpandRel& expan
             case ::substrait::Expression::RexTypeCase::kLiteral:
               break;
             default:
-              logValidateMsg(
-                  "native validation failed due to: Only field or literal is supported in project of ExpandRel.");
+              LOG_VALIDATION_MSG("Only field or literal is supported in project of ExpandRel.");
               return false;
           }
           if (rowType) {
@@ -473,11 +535,11 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::ExpandRel& expan
         }
 
       } catch (const VeloxException& err) {
-        logValidateMsg("native validation failed due to: in ExpandRel, " + err.message());
+        LOG_VALIDATION_MSG_FROM_EXCEPTION(err);
         return false;
       }
     } else {
-      logValidateMsg("native validation failed due to: Only SwitchingField is supported in ExpandRel.");
+      LOG_VALIDATION_MSG("Only SwitchingField is supported in ExpandRel.");
       return false;
     }
   }
@@ -494,7 +556,6 @@ bool validateBoundType(::substrait::Expression_WindowFunction_Bound boundType) {
     case ::substrait::Expression_WindowFunction_Bound::kPreceding:
       break;
     default:
-      VLOG(1) << "native validation failed due to: The Bound Type is not supported. ";
       return false;
   }
   return true;
@@ -502,19 +563,19 @@ bool validateBoundType(::substrait::Expression_WindowFunction_Bound boundType) {
 
 bool SubstraitToVeloxPlanValidator::validate(const ::substrait::WindowRel& windowRel) {
   if (windowRel.has_input() && !validate(windowRel.input())) {
-    logValidateMsg("native validation failed due to: windowRel input fails to validate. ");
+    LOG_VALIDATION_MSG("WindowRel input fails to validate.");
     return false;
   }
 
   // Get and validate the input types from extension.
   if (!windowRel.has_advanced_extension()) {
-    logValidateMsg("native validation failed due to: Input types are expected in WindowRel.");
+    LOG_VALIDATION_MSG("Input types are expected in WindowRel.");
     return false;
   }
   const auto& extension = windowRel.advanced_extension();
   std::vector<TypePtr> types;
   if (!validateInputTypes(extension, types)) {
-    logValidateMsg("native validation failed due to: Validation failed for input types in WindowRel.");
+    LOG_VALIDATION_MSG("Validation failed for input types in WindowRel.");
     return false;
   }
 
@@ -541,7 +602,7 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::WindowRel& windo
           case ::substrait::Expression::RexTypeCase::kLiteral:
             break;
           default:
-            logValidateMsg("native validation failed due to: Only field is supported in window functions.");
+            LOG_VALIDATION_MSG("Only field or constant is supported in window functions.");
             return false;
         }
       }
@@ -551,8 +612,8 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::WindowRel& windo
         case ::substrait::WindowType::RANGE:
           break;
         default:
-          logValidateMsg(
-              "native validation failed due to: the window type only support ROWS and RANGE, and the input type is " +
+          LOG_VALIDATION_MSG(
+              "the window type only support ROWS and RANGE, and the input type is " +
               std::to_string(windowFunction.window_type()));
           return false;
       }
@@ -560,13 +621,13 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::WindowRel& windo
       bool boundTypeSupported =
           validateBoundType(windowFunction.upper_bound()) && validateBoundType(windowFunction.lower_bound());
       if (!boundTypeSupported) {
-        logValidateMsg(
-            "native validation failed due to: The Bound Type is not supported. " +
-            std::to_string(windowFunction.lower_bound().kind_case()));
+        LOG_VALIDATION_MSG(
+            "Found unsupported Bound Type: upper " + std::to_string(windowFunction.upper_bound().kind_case()) +
+            ", lower " + std::to_string(windowFunction.lower_bound().kind_case()));
         return false;
       }
     } catch (const VeloxException& err) {
-      logValidateMsg("native validation failed due to: in window function, " + err.message());
+      LOG_VALIDATION_MSG_FROM_EXCEPTION(err);
       return false;
     }
   }
@@ -576,7 +637,7 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::WindowRel& windo
   for (const auto& funcSpec : funcSpecs) {
     auto funcName = SubstraitParser::getNameBeforeDelimiter(funcSpec);
     if (unsupportedFuncs.find(funcName) != unsupportedFuncs.end()) {
-      logValidateMsg("native validation failed due to: " + funcName + " was not supported in WindowRel.");
+      LOG_VALIDATION_MSG(funcName + " was not supported in WindowRel.");
       return false;
     }
   }
@@ -588,10 +649,9 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::WindowRel& windo
   try {
     for (const auto& expr : groupByExprs) {
       auto expression = exprConverter_->toVeloxExpr(expr, rowType);
-      auto expr_field = dynamic_cast<const core::FieldAccessTypedExpr*>(expression.get());
-      if (expr_field == nullptr) {
-        logValidateMsg(
-            "native validation failed due to: Only field is supported for partition key in Window Operator!");
+      auto exprField = dynamic_cast<const core::FieldAccessTypedExpr*>(expression.get());
+      if (exprField == nullptr) {
+        LOG_VALIDATION_MSG("Only field is supported for partition key in Window Operator!");
         return false;
       } else {
         expressions.emplace_back(expression);
@@ -601,7 +661,7 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::WindowRel& windo
     // mismatched type, exception will be thrown.
     exec::ExprSet exprSet(std::move(expressions), execCtx_);
   } catch (const VeloxException& err) {
-    logValidateMsg("native validation failed due to: in WindowRel, " + err.message());
+    LOG_VALIDATION_MSG_FROM_EXCEPTION(err);
     return false;
   }
 
@@ -615,24 +675,21 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::WindowRel& windo
       case ::substrait::SortField_SortDirection_SORT_DIRECTION_DESC_NULLS_LAST:
         break;
       default:
-        logValidateMsg(
-            "native validation failed due to: in windowRel, unsupported Sort direction " +
-            std::to_string(sort.direction()));
+        LOG_VALIDATION_MSG("in windowRel, unsupported Sort direction " + std::to_string(sort.direction()));
         return false;
     }
 
     if (sort.has_expr()) {
       try {
         auto expression = exprConverter_->toVeloxExpr(sort.expr(), rowType);
-        auto expr_field = dynamic_cast<const core::FieldAccessTypedExpr*>(expression.get());
-        if (!expr_field) {
-          logValidateMsg(
-              "native validation failed due to: in windowRel, the sorting key in Sort Operator only support field");
+        auto exprField = dynamic_cast<const core::FieldAccessTypedExpr*>(expression.get());
+        if (!exprField) {
+          LOG_VALIDATION_MSG("in windowRel, the sorting key in Sort Operator only support field.");
           return false;
         }
         exec::ExprSet exprSet({std::move(expression)}, execCtx_);
       } catch (const VeloxException& err) {
-        logValidateMsg("native validation failed due to: in WindowRel, " + err.message());
+        LOG_VALIDATION_MSG_FROM_EXCEPTION(err);
         return false;
       }
     }
@@ -648,22 +705,15 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::SortRel& sortRel
 
   // Get and validate the input types from extension.
   if (!sortRel.has_advanced_extension()) {
-    logValidateMsg("native validation failed due to: Input types are expected in SortRel.");
+    LOG_VALIDATION_MSG("Input types are expected in SortRel.");
     return false;
   }
 
   const auto& extension = sortRel.advanced_extension();
   std::vector<TypePtr> types;
   if (!validateInputTypes(extension, types)) {
-    logValidateMsg("native validation failed due to: Validation failed for input types in SortRel.");
+    LOG_VALIDATION_MSG("Validation failed for input types in SortRel.");
     return false;
-  }
-
-  for (const auto& type : types) {
-    if (type->kind() == TypeKind::TIMESTAMP) {
-      logValidateMsg("native validation failed due to: Timestamp type is not supported in SortRel.");
-      return false;
-    }
   }
 
   int32_t inputPlanNodeId = 0;
@@ -683,24 +733,21 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::SortRel& sortRel
       case ::substrait::SortField_SortDirection_SORT_DIRECTION_DESC_NULLS_LAST:
         break;
       default:
-        logValidateMsg(
-            "native validation failed due to: in sortRel, unsupported Sort direction " +
-            std::to_string(sort.direction()));
+        LOG_VALIDATION_MSG("unsupported Sort direction " + std::to_string(sort.direction()));
         return false;
     }
 
     if (sort.has_expr()) {
       try {
         auto expression = exprConverter_->toVeloxExpr(sort.expr(), rowType);
-        auto expr_field = dynamic_cast<const core::FieldAccessTypedExpr*>(expression.get());
-        if (!expr_field) {
-          logValidateMsg(
-              "native validation failed due to: in SortRel, the sorting key in Sort Operator only support field");
+        auto exprField = dynamic_cast<const core::FieldAccessTypedExpr*>(expression.get());
+        if (!exprField) {
+          LOG_VALIDATION_MSG("in SortRel, the sorting key in Sort Operator only support field.");
           return false;
         }
         exec::ExprSet exprSet({std::move(expression)}, execCtx_);
       } catch (const VeloxException& err) {
-        logValidateMsg("native validation failed due to: in SortRel, expression validation fails as" + err.message());
+        LOG_VALIDATION_MSG_FROM_EXCEPTION(err);
         return false;
       }
     }
@@ -711,19 +758,19 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::SortRel& sortRel
 
 bool SubstraitToVeloxPlanValidator::validate(const ::substrait::ProjectRel& projectRel) {
   if (projectRel.has_input() && !validate(projectRel.input())) {
-    logValidateMsg("native validation failed due to: Validation failed for ProjectRel input.");
+    LOG_VALIDATION_MSG("ProjectRel input");
     return false;
   }
 
   // Get and validate the input types from extension.
   if (!projectRel.has_advanced_extension()) {
-    logValidateMsg("native validation failed due to: Input types are expected in ProjectRel.");
+    LOG_VALIDATION_MSG("Input types are expected in ProjectRel.");
     return false;
   }
   const auto& extension = projectRel.advanced_extension();
   std::vector<TypePtr> types;
   if (!validateInputTypes(extension, types)) {
-    logValidateMsg("native validation failed due to: Validation failed for input types in ProjectRel.");
+    LOG_VALIDATION_MSG("Validation failed for input types in ProjectRel.");
     return false;
   }
 
@@ -751,7 +798,7 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::ProjectRel& proj
     // mismatched type, exception will be thrown.
     exec::ExprSet exprSet(std::move(expressions), execCtx_);
   } catch (const VeloxException& err) {
-    logValidateMsg("native validation failed due to: in ProjectRel, " + err.message());
+    LOG_VALIDATION_MSG_FROM_EXCEPTION(err);
     return false;
   }
   return true;
@@ -759,26 +806,20 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::ProjectRel& proj
 
 bool SubstraitToVeloxPlanValidator::validate(const ::substrait::FilterRel& filterRel) {
   if (filterRel.has_input() && !validate(filterRel.input())) {
-    logValidateMsg("native validation failed due to: input of FilterRel validation fails");
+    LOG_VALIDATION_MSG("input of FilterRel validation fails");
     return false;
   }
 
   // Get and validate the input types from extension.
   if (!filterRel.has_advanced_extension()) {
-    logValidateMsg("native validation failed due to: Input types are expected in FilterRel.");
+    LOG_VALIDATION_MSG("Input types are expected in FilterRel.");
     return false;
   }
   const auto& extension = filterRel.advanced_extension();
   std::vector<TypePtr> types;
   if (!validateInputTypes(extension, types)) {
-    logValidateMsg("native validation failed due to: Validation failed for input types in FilterRel.");
+    LOG_VALIDATION_MSG("Validation failed for input types in FilterRel.");
     return false;
-  }
-  for (const auto& type : types) {
-    if (type->kind() == TypeKind::TIMESTAMP) {
-      logValidateMsg("native validation failed due to: Timestamp is not fully supported in Filter");
-      return false;
-    }
   }
 
   int32_t inputPlanNodeId = 0;
@@ -800,7 +841,7 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::FilterRel& filte
     // or mismatched type, exception will be thrown.
     exec::ExprSet exprSet(std::move(expressions), execCtx_);
   } catch (const VeloxException& err) {
-    logValidateMsg("native validation failed due to: validation fails for FilterRel expression, " + err.message());
+    LOG_VALIDATION_MSG_FROM_EXCEPTION(err);
     return false;
   }
   return true;
@@ -808,12 +849,12 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::FilterRel& filte
 
 bool SubstraitToVeloxPlanValidator::validate(const ::substrait::JoinRel& joinRel) {
   if (joinRel.has_left() && !validate(joinRel.left())) {
-    logValidateMsg("native validation failed due to: validation fails for join left input. ");
+    LOG_VALIDATION_MSG("Validation fails for join left input.");
     return false;
   }
 
   if (joinRel.has_right() && !validate(joinRel.right())) {
-    logValidateMsg("native validation failed due to: validation fails for join right input. ");
+    LOG_VALIDATION_MSG("Validation fails for join right input.");
     return false;
   }
 
@@ -824,7 +865,7 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::JoinRel& joinRel
       case ::substrait::JoinRel_JoinType_JOIN_TYPE_LEFT:
         break;
       default:
-        logValidateMsg("native validation failed due to: Sort merge join only support inner and left join");
+        LOG_VALIDATION_MSG("Sort merge join only support inner and left join.");
         return false;
     }
   }
@@ -838,20 +879,20 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::JoinRel& joinRel
     case ::substrait::JoinRel_JoinType_JOIN_TYPE_ANTI:
       break;
     default:
-      logValidateMsg("native validation failed due to: Sort merge join only support inner and left join");
+      LOG_VALIDATION_MSG("Sort merge join only support inner and left join.");
       return false;
   }
 
   // Validate input types.
   if (!joinRel.has_advanced_extension()) {
-    logValidateMsg("native validation failed due to: Input types are expected in JoinRel.");
+    LOG_VALIDATION_MSG("Input types are expected in JoinRel.");
     return false;
   }
 
   const auto& extension = joinRel.advanced_extension();
   std::vector<TypePtr> types;
   if (!validateInputTypes(extension, types)) {
-    logValidateMsg("native validation failed due to: Validation failed for input types in JoinRel");
+    LOG_VALIDATION_MSG("Validation failed for input types in JoinRel.");
     return false;
   }
 
@@ -868,7 +909,7 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::JoinRel& joinRel
     try {
       planConverter_.extractJoinKeys(joinRel.expression(), leftExprs, rightExprs);
     } catch (const VeloxException& err) {
-      logValidateMsg("native validation failed due to: JoinRel expression validation fails, " + err.message());
+      LOG_VALIDATION_MSG_FROM_EXCEPTION(err);
       return false;
     }
   }
@@ -878,10 +919,64 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::JoinRel& joinRel
       auto expression = exprConverter_->toVeloxExpr(joinRel.post_join_filter(), rowType);
       exec::ExprSet exprSet({std::move(expression)}, execCtx_);
     } catch (const VeloxException& err) {
-      logValidateMsg("native validation failed due to: in post join filter, " + err.message());
+      LOG_VALIDATION_MSG_FROM_EXCEPTION(err);
       return false;
     }
   }
+  return true;
+}
+
+bool SubstraitToVeloxPlanValidator::validate(const ::substrait::CrossRel& crossRel) {
+  if (crossRel.has_left() && !validate(crossRel.left())) {
+    logValidateMsg("Native validation failed due to: validation fails for cross join left input. ");
+    return false;
+  }
+
+  if (crossRel.has_right() && !validate(crossRel.right())) {
+    logValidateMsg("Native validation failed due to: validation fails for cross join right input. ");
+    return false;
+  }
+
+  // Validate input types.
+  if (!crossRel.has_advanced_extension()) {
+    logValidateMsg("Native validation failed due to: Input types are expected in CrossRel.");
+    return false;
+  }
+
+  switch (crossRel.type()) {
+    case ::substrait::CrossRel_JoinType_JOIN_TYPE_INNER:
+    case ::substrait::CrossRel_JoinType_JOIN_TYPE_LEFT:
+      break;
+    default:
+      LOG_VALIDATION_MSG("Unsupported Join type in CrossRel");
+      return false;
+  }
+
+  const auto& extension = crossRel.advanced_extension();
+  std::vector<TypePtr> types;
+  if (!validateInputTypes(extension, types)) {
+    logValidateMsg("Native validation failed due to: Validation failed for input types in CrossRel");
+    return false;
+  }
+
+  int32_t inputPlanNodeId = 0;
+  std::vector<std::string> names;
+  names.reserve(types.size());
+  for (auto colIdx = 0; colIdx < types.size(); colIdx++) {
+    names.emplace_back(SubstraitParser::makeNodeName(inputPlanNodeId, colIdx));
+  }
+  auto rowType = std::make_shared<RowType>(std::move(names), std::move(types));
+
+  if (crossRel.has_expression()) {
+    try {
+      auto expression = exprConverter_->toVeloxExpr(crossRel.expression(), rowType);
+      exec::ExprSet exprSet({std::move(expression)}, execCtx_);
+    } catch (const VeloxException& err) {
+      logValidateMsg("Native validation failed due to: crossRel expression validation fails, " + err.message());
+      return false;
+    }
+  }
+
   return true;
 }
 
@@ -892,6 +987,7 @@ bool SubstraitToVeloxPlanValidator::validateAggRelFunctionType(const ::substrait
 
   for (const auto& smea : aggRel.measures()) {
     const auto& aggFunction = smea.measure();
+    const auto& funcStep = planConverter_.toAggregationFunctionStep(aggFunction);
     auto funcSpec = planConverter_.findFuncSpec(aggFunction.function_reference());
     std::vector<TypePtr> types;
     bool isDecimal = false;
@@ -903,16 +999,15 @@ bool SubstraitToVeloxPlanValidator::validateAggRelFunctionType(const ::substrait
         }
       }
     } catch (const VeloxException& err) {
-      logValidateMsg(
-          "native validation failed due to: Validation failed for input type in AggregateRel function due to:" +
-          err.message());
+      LOG_VALIDATION_MSG_FROM_EXCEPTION(err);
       return false;
     }
-    auto funcName = SubstraitParser::mapToVeloxFunction(SubstraitParser::getNameBeforeDelimiter(funcSpec), isDecimal);
+    auto baseFuncName =
+        SubstraitParser::mapToVeloxFunction(SubstraitParser::getNameBeforeDelimiter(funcSpec), isDecimal);
+    auto funcName = planConverter_.toAggregationFunctionName(baseFuncName, funcStep);
     auto signaturesOpt = exec::getAggregateFunctionSignatures(funcName);
     if (!signaturesOpt) {
-      logValidateMsg(
-          "native validation failed due to: can not find function signature for " + funcName + " in AggregateRel.");
+      LOG_VALIDATION_MSG("can not find function signature for " + funcName + " in AggregateRel.");
       return false;
     }
 
@@ -921,12 +1016,9 @@ bool SubstraitToVeloxPlanValidator::validateAggRelFunctionType(const ::substrait
       exec::SignatureBinder binder(*signature, types);
       if (binder.tryBind()) {
         auto resolveType = binder.tryResolveType(
-            exec::isPartialOutput(planConverter_.toAggregationStep(aggRel)) ? signature->intermediateType()
-                                                                            : signature->returnType());
+            exec::isPartialOutput(funcStep) ? signature->intermediateType() : signature->returnType());
         if (resolveType == nullptr) {
-          logValidateMsg(
-              "native validation failed due to: Validation failed for function " + funcName +
-              "resolve type in AggregateRel.");
+          LOG_VALIDATION_MSG("Validation failed for function " + funcName + " resolve type in AggregateRel.");
           return false;
         }
         resolved = true;
@@ -934,9 +1026,7 @@ bool SubstraitToVeloxPlanValidator::validateAggRelFunctionType(const ::substrait
       }
     }
     if (!resolved) {
-      logValidateMsg(
-          "native validation failed due to: Validation failed for function " + funcName +
-          " bind signatures in AggregateRel.");
+      LOG_VALIDATION_MSG("Validation failed for function " + funcName + " bind signatures in AggregateRel.");
       return false;
     }
   }
@@ -945,7 +1035,7 @@ bool SubstraitToVeloxPlanValidator::validateAggRelFunctionType(const ::substrait
 
 bool SubstraitToVeloxPlanValidator::validate(const ::substrait::AggregateRel& aggRel) {
   if (aggRel.has_input() && !validate(aggRel.input())) {
-    logValidateMsg("native validation failed due to: input validation fails in AggregateRel.");
+    LOG_VALIDATION_MSG("Input validation fails in AggregateRel.");
     return false;
   }
 
@@ -956,7 +1046,7 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::AggregateRel& ag
     // Aggregate always has advanced extension for streaming aggregate optimization,
     // but only some of them have enhancement for validation.
     if (extension.has_enhancement() && !validateInputTypes(extension, types)) {
-      logValidateMsg("native validation failed due to: Validation failed for input types in AggregateRel.");
+      LOG_VALIDATION_MSG("Validation failed for input types in AggregateRel.");
       return false;
     }
   }
@@ -969,7 +1059,7 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::AggregateRel& ag
         case ::substrait::Expression::RexTypeCase::kSelection:
           break;
         default:
-          logValidateMsg("native validation failed due to: Only field is supported in groupings.");
+          LOG_VALIDATION_MSG("Only field is supported in groupings.");
           return false;
       }
     }
@@ -989,8 +1079,7 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::AggregateRel& ag
             case ::substrait::Expression::RexTypeCase::kSelection:
               break;
             default:
-              logValidateMsg(
-                  "native validation failed due to: Only field is supported in aggregate filter expression.");
+              LOG_VALIDATION_MSG("Only field is supported in aggregate filter expression.");
               return false;
           }
         }
@@ -1002,7 +1091,7 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::AggregateRel& ag
       SubstraitParser::parseType(aggFunction.output_type());
       // Validate the size of arguments.
       if (SubstraitParser::getNameBeforeDelimiter(functionSpec) == "count" && aggFunction.arguments().size() > 1) {
-        logValidateMsg("native validation failed due to: count should have only one argument");
+        LOG_VALIDATION_MSG("Count should have only one argument.");
         // Count accepts only one argument.
         return false;
       }
@@ -1014,90 +1103,50 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::AggregateRel& ag
           case ::substrait::Expression::RexTypeCase::kLiteral:
             break;
           default:
-            logValidateMsg("native validation failed due to: Only field is supported in aggregate functions.");
+            LOG_VALIDATION_MSG("Only field is supported in aggregate functions.");
             return false;
         }
       }
     } catch (const VeloxException& err) {
-      logValidateMsg("native validation failed due to: aggregate function validation fails, " + err.message());
+      LOG_VALIDATION_MSG_FROM_EXCEPTION(err);
       return false;
     }
   }
 
-  // The supported aggregation functions. TODO: Remove this set when Presto aggregate functions in Velox are not needed
-  // to be registered.
+  // The supported aggregation functions. TODO: Remove this set when Presto aggregate functions in Velox are not
+  // needed to be registered.
   static const std::unordered_set<std::string> supportedAggFuncs = {
       "sum",
-      "sum_partial",
-      "sum_merge",
       "collect_set",
+      "collect_list",
       "count",
-      "count_partial",
-      "count_merge",
       "avg",
-      "avg_partial",
-      "avg_merge",
       "min",
-      "min_partial",
-      "min_merge",
       "max",
-      "max_partial",
-      "max_merge",
       "min_by",
-      "min_by_partial",
-      "min_by_merge",
       "max_by",
-      "max_by_partial",
-      "max_by_merge",
       "stddev_samp",
-      "stddev_samp_partial",
-      "stddev_samp_merge",
       "stddev_pop",
-      "stddev_pop_partial",
-      "stddev_pop_merge",
       "bloom_filter_agg",
       "var_samp",
-      "var_samp_partial",
-      "var_samp_merge",
       "var_pop",
-      "var_pop_partial",
-      "var_pop_merge",
       "bit_and",
-      "bit_and_partial",
-      "bit_and_merge",
       "bit_or",
-      "bit_or_partial",
-      "bit_or_merge",
       "bit_xor",
-      "bit_xor_partial",
-      "bit_xor_merge",
       "first",
-      "first_partial",
-      "first_merge",
       "first_ignore_null",
-      "first_ignore_null_partial",
-      "first_ignore_null_merge",
       "last",
-      "last_partial",
-      "last_merge",
       "last_ignore_null",
-      "last_ignore_null_partial",
-      "last_ignore_null_merge",
       "corr",
-      "corr_partial",
-      "corr_merge",
       "covar_pop",
-      "covar_pop_partial",
-      "covar_pop_merge",
       "covar_samp",
-      "covar_samp_partial",
-      "covar_samp_merge",
-      "approx_distinct"};
+      "approx_distinct",
+      "skewness"};
 
   for (const auto& funcSpec : funcSpecs) {
     auto funcName = SubstraitParser::getNameBeforeDelimiter(funcSpec);
     if (supportedAggFuncs.find(funcName) == supportedAggFuncs.end()) {
-      logValidateMsg("native validation failed due to:  " + funcName + " was not supported in AggregateRel.");
+      LOG_VALIDATION_MSG(funcName + " was not supported in AggregateRel.");
       return false;
     }
   }
@@ -1117,7 +1166,7 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::AggregateRel& ag
     }
 
     if (!hasExpr) {
-      logValidateMsg("native validation failed due to: aggregation must specify either grouping keys or aggregates.");
+      LOG_VALIDATION_MSG("Aggregation must specify either grouping keys or aggregates.");
       return false;
     }
   }
@@ -1128,7 +1177,7 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::ReadRel& readRel
   try {
     planConverter_.toVeloxPlan(readRel);
   } catch (const VeloxException& err) {
-    logValidateMsg("native validation failed due to: in ReadRel, " + err.message());
+    LOG_VALIDATION_MSG_FROM_EXCEPTION(err);
     return false;
   }
 
@@ -1150,13 +1199,15 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::ReadRel& readRel
     auto rowType = std::make_shared<RowType>(std::move(names), std::move(veloxTypeList));
     std::vector<core::TypedExprPtr> expressions;
     try {
+      if (!validateExpression(readRel.filter(), rowType)) {
+        return false;
+      }
       expressions.emplace_back(exprConverter_->toVeloxExpr(readRel.filter(), rowType));
       // Try to compile the expressions. If there is any unregistered function
       // or mismatched type, exception will be thrown.
       exec::ExprSet exprSet(std::move(expressions), execCtx_);
     } catch (const VeloxException& err) {
-      logValidateMsg(
-          "native validation failed due to: filter expression validation fails in ReadRel, " + err.message());
+      LOG_VALIDATION_MSG_FROM_EXCEPTION(err);
       return false;
     }
   }
@@ -1173,6 +1224,8 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::Rel& rel) {
     return validate(rel.filter());
   } else if (rel.has_join()) {
     return validate(rel.join());
+  } else if (rel.has_cross()) {
+    return validate(rel.cross());
   } else if (rel.has_read()) {
     return validate(rel.read());
   } else if (rel.has_sort()) {
@@ -1185,6 +1238,8 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::Rel& rel) {
     return validate(rel.fetch());
   } else if (rel.has_window()) {
     return validate(rel.window());
+  } else if (rel.has_write()) {
+    return validate(rel.write());
   } else {
     return false;
   }

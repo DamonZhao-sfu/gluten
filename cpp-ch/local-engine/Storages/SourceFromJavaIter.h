@@ -18,6 +18,7 @@
 #include <jni.h>
 #include <Processors/ISource.h>
 #include <Interpreters/Context.h>
+#include <Columns/IColumn.h>
 
 namespace local_engine
 {
@@ -38,13 +39,12 @@ public:
 private:
     DB::Chunk generate() override;
     void convertNullable(DB::Chunk & chunk);
+    DB::ColumnPtr convertNestedNullable(const DB::ColumnPtr & column, const DB::DataTypePtr & target_type);
 
     jobject java_iter;
     bool materialize_input;
     DB::ContextPtr context;
     DB::Block original_header;
-
-    DB::Block pending_block;
 };
 
 }

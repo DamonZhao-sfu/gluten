@@ -28,8 +28,7 @@ class GlutenClickHouseTPCHParquetAQESuite
   extends GlutenClickHouseTPCHAbstractSuite
   with AdaptiveSparkPlanHelper {
 
-  override protected val resourcePath: String =
-    "../../../../gluten-core/src/test/resources/tpch-data"
+  override protected val needCopyParquetToTablePath = true
 
   override protected val tablesPath: String = basePath + "/tpch-data"
   override protected val tpchQueries: String =
@@ -43,14 +42,13 @@ class GlutenClickHouseTPCHParquetAQESuite
       .set("spark.io.compression.codec", "snappy")
       .set("spark.sql.shuffle.partitions", "5")
       .set("spark.sql.autoBroadcastJoinThreshold", "10MB")
-      .set("spark.gluten.sql.columnar.backend.ch.use.v2", "false")
       .set("spark.sql.adaptive.enabled", "true")
-      .set("spark.gluten.sql.columnar.backend.ch.runtime_config.use_local_format", "true")
+      .set("spark.gluten.sql.columnar.backend.ch.runtime_config.use_local_format", "false")
       .set("spark.gluten.sql.columnar.backend.ch.shuffle.hash.algorithm", "sparkMurmurHash3_32")
   }
 
   override protected def createTPCHNotNullTables(): Unit = {
-    createTPCHParquetTables(tablesPath)
+    createNotNullTPCHTablesInParquet(tablesPath)
   }
 
   test("TPCH Q1") {
@@ -98,7 +96,7 @@ class GlutenClickHouseTPCHParquetAQESuite
         df =>
           assert(df.queryExecution.executedPlan.isInstanceOf[AdaptiveSparkPlanExec])
           val bhjRes = collect(df.queryExecution.executedPlan) {
-            case bhj: BroadcastHashJoinExecTransformer => bhj
+            case bhj: BroadcastHashJoinExecTransformerBase => bhj
           }
           assert(bhjRes.isEmpty)
       }
@@ -117,8 +115,7 @@ class GlutenClickHouseTPCHParquetAQESuite
   ignore("TPCH Q7 - with shuffle.partitions=1") {
     withSQLConf(
       ("spark.sql.shuffle.partitions", "1"),
-      ("spark.sql.autoBroadcastJoinThreshold", "-1"),
-      ("spark.gluten.sql.columnar.backend.ch.use.v2", "true")) {
+      ("spark.sql.autoBroadcastJoinThreshold", "-1")) {
       runTPCHQuery(7) { df => }
     }
   }
@@ -126,8 +123,7 @@ class GlutenClickHouseTPCHParquetAQESuite
   test("TPCH Q7") {
     withSQLConf(
       ("spark.sql.shuffle.partitions", "2"),
-      ("spark.sql.autoBroadcastJoinThreshold", "-1"),
-      ("spark.gluten.sql.columnar.backend.ch.use.v2", "true")) {
+      ("spark.sql.autoBroadcastJoinThreshold", "-1")) {
       runTPCHQuery(7) { df => }
     }
   }
@@ -135,8 +131,7 @@ class GlutenClickHouseTPCHParquetAQESuite
   test("TPCH Q8") {
     withSQLConf(
       ("spark.sql.shuffle.partitions", "1"),
-      ("spark.sql.autoBroadcastJoinThreshold", "-1"),
-      ("spark.gluten.sql.columnar.backend.ch.use.v2", "true")) {
+      ("spark.sql.autoBroadcastJoinThreshold", "-1")) {
       runTPCHQuery(8) { df => }
     }
   }
@@ -171,8 +166,7 @@ class GlutenClickHouseTPCHParquetAQESuite
   test("TPCH Q14") {
     withSQLConf(
       ("spark.sql.shuffle.partitions", "1"),
-      ("spark.sql.autoBroadcastJoinThreshold", "-1"),
-      ("spark.gluten.sql.columnar.backend.ch.use.v2", "true")) {
+      ("spark.sql.autoBroadcastJoinThreshold", "-1")) {
       runTPCHQuery(14) { df => }
     }
   }
@@ -223,8 +217,7 @@ class GlutenClickHouseTPCHParquetAQESuite
         val adaptiveSparkPlanExec = collectWithSubqueries(df.queryExecution.executedPlan) {
           case adaptive: AdaptiveSparkPlanExec => adaptive
         }
-        assert(adaptiveSparkPlanExec.size == 3)
-        assert(adaptiveSparkPlanExec(1) == adaptiveSparkPlanExec(2))
+        assert(adaptiveSparkPlanExec.size == 2)
     }
   }
 

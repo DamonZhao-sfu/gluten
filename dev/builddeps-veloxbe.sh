@@ -14,6 +14,8 @@ BUILD_EXAMPLES=OFF
 BUILD_BENCHMARKS=OFF
 BUILD_JEMALLOC=OFF
 BUILD_PROTOBUF=ON
+BUILD_VELOX_TESTS=OFF
+BUILD_VELOX_BENCHMARKS=OFF
 ENABLE_QAT=OFF
 ENABLE_IAA=OFF
 ENABLE_HBM=OFF
@@ -29,6 +31,20 @@ VELOX_REPO=""
 VELOX_BRANCH=""
 VELOX_HOME=""
 VELOX_PARAMETER=""
+COMPILE_ARROW_JAVA=OFF
+
+# set default number of threads as cpu cores minus 2
+if [[ "$(uname)" == "Darwin" ]]; then
+    physical_cpu_cores=$(sysctl -n hw.physicalcpu)
+    ignore_cores=2
+    if [ "$physical_cpu_cores" -gt "$ignore_cores" ]; then
+        NUM_THREADS=${NUM_THREADS:-$(($physical_cpu_cores - $ignore_cores))}
+    else
+        NUM_THREADS=${NUM_THREADS:-$physical_cpu_cores}
+    fi
+else
+    NUM_THREADS=${NUM_THREADS:-$(nproc --ignore=2)}
+fi
 
 for arg in "$@"
 do
@@ -100,17 +116,33 @@ do
         shift # Remove argument name from processing
         ;;
         --velox_repo=*)
-	VELOX_REPO=("${arg#*=}")
-	shift # Remove argument name from processing
-	;;
+        VELOX_REPO=("${arg#*=}")
+        shift # Remove argument name from processing
+        ;;
         --velox_branch=*)
-	VELOX_BRANCH=("${arg#*=}")
-	shift # Remove argument name from processing
-	;;
+        VELOX_BRANCH=("${arg#*=}")
+        shift # Remove argument name from processing
+        ;;
         --velox_home=*)
-	VELOX_HOME=("${arg#*=}")
-	shift # Remove argument name from processing
-	;;
+        VELOX_HOME=("${arg#*=}")
+        shift # Remove argument name from processing
+        ;;
+        --build_velox_tests=*)
+        BUILD_VELOX_TESTS=("${arg#*=}")
+        shift # Remove argument name from processing
+        ;;
+        --build_velox_benchmarks=*)
+        BUILD_VELOX_BENCHMARKS=("${arg#*=}")
+        shift # Remove argument name from processing
+        ;;
+        --compile_arrow_java=*)
+        COMPILE_ARROW_JAVA=("${arg#*=}")
+        shift # Remove argument name from processing
+        ;;
+        --num_threads=*)
+        NUM_THREADS=("${arg#*=}")
+        shift # Remove argument name from processing
+        ;;
 	      *)
         OTHER_ARGUMENTS+=("$1")
         shift # Remove generic argument from processing
@@ -126,12 +158,12 @@ function concat_velox_param {
 
     # check velox branch
     if [[ -n $VELOX_BRANCH ]]; then
-	VELOX_PARAMETER+="--velox_branch=$VELOX_BRANCH "
+        VELOX_PARAMETER+="--velox_branch=$VELOX_BRANCH "
     fi
 
     # check velox home
     if [[ -n $VELOX_HOME ]]; then
-	VELOX_PARAMETER+="--velox_home=$VELOX_HOME "
+        VELOX_PARAMETER+="--velox_home=$VELOX_HOME "
     fi
 }
 
@@ -141,12 +173,14 @@ if [ "$ENABLE_VCPKG" = "ON" ]; then
     eval "$envs"
 fi
 
-##install velox
+## build velox
 concat_velox_param
 cd $GLUTEN_DIR/ep/build-velox/src
 ./get_velox.sh --enable_hdfs=$ENABLE_HDFS --build_protobuf=$BUILD_PROTOBUF --enable_s3=$ENABLE_S3 --enable_gcs=$ENABLE_GCS --enable_abfs=$ENABLE_ABFS $VELOX_PARAMETER
+# When BUILD_TESTS is on for gluten cpp, we need turn on VELOX_BUILD_TEST_UTILS via build_test_utils.
 ./build_velox.sh --run_setup_script=$RUN_SETUP_SCRIPT --enable_s3=$ENABLE_S3 --enable_gcs=$ENABLE_GCS --build_type=$BUILD_TYPE --enable_hdfs=$ENABLE_HDFS \
-                 --enable_abfs=$ENABLE_ABFS --enable_ep_cache=$ENABLE_EP_CACHE --build_tests=$BUILD_TESTS --build_benchmarks=$BUILD_BENCHMARKS
+                 --enable_abfs=$ENABLE_ABFS --enable_ep_cache=$ENABLE_EP_CACHE --build_test_utils=$BUILD_TESTS --build_tests=$BUILD_VELOX_TESTS --build_benchmarks=$BUILD_VELOX_BENCHMARKS \
+                 --compile_arrow_java=$COMPILE_ARROW_JAVA  --num_threads=$NUM_THREADS
 
 ## compile gluten cpp
 cd $GLUTEN_DIR/cpp
@@ -156,4 +190,4 @@ cd build
 cmake -DBUILD_VELOX_BACKEND=ON -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
       -DBUILD_TESTS=$BUILD_TESTS -DBUILD_EXAMPLES=$BUILD_EXAMPLES -DBUILD_BENCHMARKS=$BUILD_BENCHMARKS -DBUILD_JEMALLOC=$BUILD_JEMALLOC \
       -DENABLE_HBM=$ENABLE_HBM -DENABLE_QAT=$ENABLE_QAT -DENABLE_IAA=$ENABLE_IAA -DENABLE_GCS=$ENABLE_GCS -DENABLE_S3=$ENABLE_S3 -DENABLE_HDFS=$ENABLE_HDFS -DENABLE_ABFS=$ENABLE_ABFS ..
-make -j
+make -j $NUM_THREADS

@@ -19,20 +19,23 @@ package io.glutenproject.execution
 import io.glutenproject.GlutenConfig
 import io.glutenproject.utils.UTSystemParameters
 
+import org.apache.spark.SPARK_VERSION_SHORT
 import org.apache.spark.SparkConf
+import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.delta.DeltaLog
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
-import org.apache.spark.sql.execution.datasources.v2.clickhouse.ClickHouseLog
 import org.apache.spark.sql.hive.HiveTableScanExecTransformer
 import org.apache.spark.sql.internal.SQLConf
 
-import org.apache.commons.io.FileUtils
 import org.apache.hadoop.fs.Path
 
 import java.io.{File, PrintWriter}
-import java.sql.Timestamp
+import java.sql.{Date, Timestamp}
 
-case class AllDataTypesWithComplextType(
+import scala.reflect.ClassTag
+
+case class AllDataTypesWithComplexType(
     string_field: String = null,
     int_field: java.lang.Integer = null,
     long_field: java.lang.Long = null,
@@ -50,22 +53,46 @@ case class AllDataTypesWithComplextType(
     mapValueContainsNull: Map[Int, Option[Long]] = null
 )
 
-class GlutenClickHouseHiveTableSuite()
-  extends GlutenClickHouseTPCHAbstractSuite
+object AllDataTypesWithComplexType {
+  def genTestData(): Seq[AllDataTypesWithComplexType] = {
+    (0 to 199).map {
+      i =>
+        if (i % 100 == 1) {
+          AllDataTypesWithComplexType()
+        } else {
+          AllDataTypesWithComplexType(
+            s"$i",
+            i,
+            i.toLong,
+            i.toFloat,
+            i.toDouble,
+            i.toShort,
+            i.toByte,
+            i % 2 == 0,
+            new java.math.BigDecimal(i + ".56"),
+            Date.valueOf(new Date(System.currentTimeMillis()).toLocalDate.plusDays(i % 10)),
+            Timestamp.valueOf(
+              new Timestamp(System.currentTimeMillis()).toLocalDateTime.plusDays(i % 10)),
+            Seq.apply(i + 1, i + 2, i + 3),
+            Seq.apply(Option.apply(i + 1), Option.empty, Option.apply(i + 3)),
+            Map.apply((i + 1, i + 2), (i + 3, i + 4)),
+            Map.empty
+          )
+        }
+    }
+  }
+}
+
+class GlutenClickHouseHiveTableSuite
+  extends GlutenClickHouseWholeStageTransformerSuite
   with AdaptiveSparkPlanHelper {
 
   private var _hiveSpark: SparkSession = _
 
-  override protected val resourcePath: String =
-    "../../../../gluten-core/src/test/resources/tpch-data"
-
-  override protected val tablesPath: String = basePath + "/tpch-data"
-  override protected val tpchQueries: String =
-    rootPath + "../../../../gluten-core/src/test/resources/tpch-queries"
-  override protected val queriesResults: String = rootPath + "queries-output"
-  override protected def createTPCHNullableTables(): Unit = {}
-
-  override protected def createTPCHNotNullTables(): Unit = {}
+  protected lazy val sparkVersion: String = {
+    val version = SPARK_VERSION_SHORT.split("\\.")
+    version(0) + "." + version(1)
+  }
 
   override protected def sparkConf: SparkConf = {
     new SparkConf()
@@ -79,13 +106,6 @@ class GlutenClickHouseHiveTableSuite()
       .set("spark.sql.shuffle.partitions", "5")
       .set("spark.sql.adaptive.enabled", "false")
       .set("spark.sql.files.minPartitionNum", "1")
-      .set(
-        "spark.sql.catalog.spark_catalog",
-        "org.apache.spark.sql.execution.datasources.v2.clickhouse.ClickHouseSparkCatalog")
-      .set("spark.databricks.delta.maxSnapshotLineageLength", "20")
-      .set("spark.databricks.delta.snapshotPartitions", "1")
-      .set("spark.databricks.delta.properties.defaults.checkpointInterval", "5")
-      .set("spark.databricks.delta.stalenessLimit", "3600000")
       .set("spark.gluten.sql.columnar.columnartorow", "true")
       .set("spark.gluten.sql.columnar.backend.ch.worker.id", "1")
       .set(GlutenConfig.GLUTEN_LIB_PATH, UTSystemParameters.getClickHouseLibPath())
@@ -182,38 +202,13 @@ class GlutenClickHouseHiveTableSuite()
       "map_field map<int, long>," +
       "map_field_with_null map<int, long>) stored as %s".format(fileFormat)
 
-  def genTestData(): Seq[AllDataTypesWithComplextType] = {
-    (0 to 199).map {
-      i =>
-        if (i % 100 == 1) {
-          AllDataTypesWithComplextType()
-        } else {
-          AllDataTypesWithComplextType(
-            s"$i",
-            i,
-            i.toLong,
-            i.toFloat,
-            i.toDouble,
-            i.toShort,
-            i.toByte,
-            i % 2 == 0,
-            new java.math.BigDecimal(i + ".56"),
-            new java.sql.Date(System.currentTimeMillis()),
-            new Timestamp(System.currentTimeMillis()),
-            Seq.apply(i + 1, i + 2, i + 3),
-            Seq.apply(Option.apply(i + 1), Option.empty, Option.apply(i + 3)),
-            Map.apply((i + 1, i + 2), (i + 3, i + 4)),
-            Map.empty
-          )
-        }
-    }
-  }
-
   protected def initializeTable(
       table_name: String,
       table_create_sql: String,
       partitions: Seq[String]): Unit = {
-    spark.createDataFrame(genTestData()).createOrReplaceTempView("tmp_t")
+    spark
+      .createDataFrame(AllDataTypesWithComplexType.genTestData())
+      .createOrReplaceTempView("tmp_t")
     val truncate_sql = "truncate table %s".format(table_name)
     val drop_sql = "drop table if exists %s".format(table_name)
     spark.sql(drop_sql)
@@ -230,15 +225,6 @@ class GlutenClickHouseHiveTableSuite()
   }
 
   override def beforeAll(): Unit = {
-    // prepare working paths
-    val basePathDir = new File(basePath)
-    if (basePathDir.exists()) {
-      FileUtils.forceDelete(basePathDir)
-    }
-    FileUtils.forceMkdir(basePathDir)
-    FileUtils.forceMkdir(new File(warehouse))
-    FileUtils.forceMkdir(new File(metaStorePathAbsolute))
-    FileUtils.copyDirectory(new File(rootPath + resourcePath), new File(tablesPath))
     super.beforeAll()
     initializeTable(txt_table_name, txt_table_create_sql, null)
     initializeTable(txt_user_define_input, txt_table_user_define_create_sql, null)
@@ -250,7 +236,7 @@ class GlutenClickHouseHiveTableSuite()
   }
 
   override protected def afterAll(): Unit = {
-    ClickHouseLog.clearCache()
+    DeltaLog.clearCache()
 
     try {
       super.afterAll()
@@ -1063,12 +1049,192 @@ class GlutenClickHouseHiveTableSuite()
   }
 
   test("test 'hive udf'") {
-    val jarPath = "src/test/resources/udfs/hive-test-udfs.jar"
-    val jarUrl = s"file://${System.getProperty("user.dir")}/$jarPath"
+    val jarPath = "udfs/hive-test-udfs.jar"
+    val jarUrl = s"file://$rootPath/$jarPath"
     spark.sql(
       s"CREATE FUNCTION my_add as " +
         s"'org.apache.hadoop.hive.contrib.udf.example.UDFExampleAdd2' USING JAR '$jarUrl'")
     runQueryAndCompare("select MY_ADD(id, id+1) from range(10)")(
       checkOperatorMatch[ProjectExecTransformer])
+  }
+
+  test("GLUTEN-4333: fix CSE in aggregate operator") {
+    def checkOperatorCount[T <: TransformSupport](count: Int)(df: DataFrame)(implicit
+        tag: ClassTag[T]): Unit = {
+      if (sparkVersion.equals("3.3")) {
+        assert(
+          getExecutedPlan(df).count(
+            plan => {
+              plan.getClass == tag.runtimeClass
+            }) == count,
+          s"executed plan: ${getExecutedPlan(df)}")
+      }
+    }
+
+    val createTableSql =
+      """
+        |CREATE TABLE `test_cse`(
+        |  `uid` bigint,
+        |  `event` struct<time:bigint,event_info:map<string,string>>
+        |)  PARTITIONED BY (
+        |  `day` string)
+        |ROW FORMAT SERDE
+        |  'org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe'
+        |STORED AS INPUTFORMAT
+        |  'org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat'
+        |OUTPUTFORMAT
+        |  'org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat'
+        """.stripMargin
+    spark.sql(createTableSql)
+    val querySql =
+      """
+        |select day,uid,xxx3,type,
+        |if(xxx1 is  null or xxx1 =''  or  xxx1='-1'   or  xxx1='0',-1,xxx1) xxx1,
+        |if(xxx2 is  null or xxx2 ='' or  xxx2 =0 or  xxx2=-1 ,-1,xxx2) xxx2,
+        |cast(if(xxx1 in (48,49),1,
+        |if(xxx1 in (1,2),2,
+        |if(xxx1 in (18,19),3,
+        |if(xxx1 in (24,25),4,
+        |if(xxx1 in (34,35),5,
+        |if(xxx1 in (39,40),6,
+        |if(xxx1 in (38,47),xxx1,-1))))))) as string) as xxx1_type,count(uid) as cnt
+        |from
+        |(
+        |select
+        |day
+        |,uid
+        |,event.event_info['xxx3'] xxx3
+        |,event.event_info['type'] type
+        |,event.event_info['xxx1'] xxx1
+        |,event.event_info['xxx2'] xxx2
+        |,round(event.time/1000)
+        |from  test_cse
+        |where
+        |event.event_info['type']  in (1,2)
+        |group by day
+        |,uid
+        |,event.event_info['xxx3']
+        |,event.event_info['type']
+        |,event.event_info['xxx1']
+        |,event.event_info['xxx2']
+        |,round(event.time/1000)
+        |)
+        |group by day,uid,xxx3,type,
+        |if(xxx1 is  null or xxx1 =''  or  xxx1='-1'   or  xxx1='0',-1,xxx1),
+        |if(xxx2 is  null or xxx2 ='' or  xxx2 =0 or  xxx2=-1 ,-1,xxx2),
+        |cast(if(xxx1 in (48,49),1,
+        |if(xxx1 in (1,2),2,
+        |if(xxx1 in (18,19),3,
+        |if(xxx1 in (24,25),4,
+        |if(xxx1 in (34,35),5,
+        |if(xxx1 in (39,40),6,
+        |if(xxx1 in (38,47),xxx1,-1))))))) as string)
+        """.stripMargin
+    runQueryAndCompare(querySql)(df => checkOperatorCount[ProjectExecTransformer](2)(df))
+  }
+
+  test(
+    "Gluten GetArrayStructFields: SPARK-33907: bad json input with " +
+      "json pruning optimization: GetArrayStructFields") {
+    val createSql =
+      """
+        |CREATE TABLE table_33907 AS
+        |  SELECT  '[{"a": 1, "b": 2}, {"a": 3, "b": 4}]' AS value
+      """.stripMargin
+    spark.sql(createSql)
+
+    val selectSql = "select from_json(value, 'array<struct<a:int,b:int>>').b from table_33907"
+    Seq("true", "false").foreach {
+      enabled =>
+        withSQLConf(SQLConf.JSON_EXPRESSION_OPTIMIZATION.key -> enabled) {
+          runQueryAndCompare(selectSql)(checkOperatorMatch[ProjectExecTransformer])
+        }
+    }
+  }
+
+  test(
+    "Gluten GetArrayStructFields: SPARK-37450: " +
+      "Prunes unnecessary fields from Explode for count aggregation") {
+    val createSql1 =
+      """
+        |CREATE TABLE table_37450 using json AS
+        |  SELECT '[{"itemId":1,"itemData":"a"},{"itemId":2,"itemData":"b"}]' as value
+      """.stripMargin
+    spark.sql(createSql1)
+
+    val createSql2 =
+      """
+        |CREATE TABLE table_37450_orc using orc
+        |  SELECT from_json(value, 'array<struct<itemId:long, itemData:string>>') as items
+        |  FROM table_37450
+      """.stripMargin
+    spark.sql(createSql2)
+
+    val selectSql = "SELECT count(*) FROM table_37450_orc LATERAL VIEW explode(items) as item"
+    Seq("true", "false").foreach {
+      enabled =>
+        withSQLConf("spark.sql.orc.enableVectorizedReader" -> enabled) {
+          compareResultsAgainstVanillaSpark(selectSql, compareResult = true, _ => {})
+        }
+    }
+  }
+
+  test(
+    "Gluten GetArrayStructFields: SPARK-37450: " +
+      "Prunes unnecessary fields from Explode for friend's middle name") {
+    val createSql =
+      """
+        |CREATE TABLE contacts (
+        |  `id` INT,
+        |  `name` STRUCT<`first`: STRING, `middle`: STRING, `last`: STRING>,
+        |  `address` STRING,
+        |  `pets` INT,
+        |  `friends` ARRAY<STRUCT<`first`: STRING, `middle`: STRING, `last`: STRING>>,
+        |  `relatives` MAP<STRING, STRUCT<`first`: STRING, `middle`: STRING, `last`: STRING>>,
+        |  `employer` STRUCT<`id`: INT, `company`: STRUCT<`name`: STRING, `address`: STRING>>,
+        |  `relations` MAP<STRUCT<`first`: STRING, `middle`: STRING, `last`: STRING>,STRING>,
+        |  `p` INT
+        |) using parquet;
+      """.stripMargin
+    spark.sql(createSql)
+
+    val insertSql =
+      """
+        |INSERT INTO contacts
+        |VALUES
+        |  (
+        |    1,
+        |    named_struct('first', 'John', 'middle', 'M', 'last', 'Doe'),
+        |    '123 Main St',
+        |    2,
+        |    array(named_struct('first', 'Jane', 'middle', 'A', 'last', 'Smith')),
+        |    map('Uncle', named_struct('first', 'Bob', 'middle', 'B', 'last', 'Johnson')),
+        |    named_struct('id', 1, 'company',
+        |      named_struct('name', 'ABC Corp', 'address', '456 Market St')),
+        |    map(named_struct('first', 'Jane', 'middle', 'A', 'last', 'Smith'), 'Friend'),
+        |    1
+        |  ),
+        |  (
+        |    2,
+        |    named_struct('first', 'Jane', 'middle', 'A', 'last', 'Smith'),
+        |    '456 Market St',
+        |    1,
+        |    array(named_struct('first', 'John', 'middle', 'M', 'last', 'Doe')),
+        |    map('Aunt', named_struct('first', 'Alice', 'middle', 'A', 'last', 'Johnson')),
+        |    named_struct('id', 2, 'company',
+        |      named_struct('name', 'XYZ Corp', 'address', '789 Broadway St')),
+        |    map(named_struct('first', 'John', 'middle', 'M', 'last', 'Doe'), 'Friend'),
+        |    2
+        |  );
+      """.stripMargin
+    spark.sql(insertSql)
+
+    val selectSql = "SELECT friend.MIDDLE FROM contacts LATERAL VIEW explode(friends) as friend"
+    Seq("true", "false").foreach {
+      enabled =>
+        withSQLConf("spark.sql.parquet.enableVectorizedReader" -> enabled) {
+          compareResultsAgainstVanillaSpark(selectSql, compareResult = true, _ => {})
+        }
+    }
   }
 }

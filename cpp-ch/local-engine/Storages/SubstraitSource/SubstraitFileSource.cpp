@@ -86,20 +86,9 @@ SubstraitFileSource::SubstraitFileSource(
     }
 }
 
-void SubstraitFileSource::setKeyCondition(const DB::ActionsDAG::NodeRawConstPtrs & nodes, DB::ContextPtr context_)
+void SubstraitFileSource::setKeyCondition(const DB::ActionsDAGPtr & filter_actions_dag, DB::ContextPtr context_)
 {
-    const auto & keys = to_read_header;
-    std::unordered_map<std::string, DB::ColumnWithTypeAndName> node_name_to_input_column;
-    for (const auto & column : keys.getColumnsWithTypeAndName())
-        node_name_to_input_column.insert({column.name, column});
-
-    auto filter_actions_dag = DB::ActionsDAG::buildFilterActionsDAG(nodes, node_name_to_input_column, context);
-    key_condition = std::make_shared<const DB::KeyCondition>(
-        filter_actions_dag,
-        context_,
-        keys.getNames(),
-        std::make_shared<DB::ExpressionActions>(std::make_shared<DB::ActionsDAG>(keys.getColumnsWithTypeAndName())),
-        DB::NameSet{});
+    setKeyConditionImpl(filter_actions_dag, context_, to_read_header);
 }
 
 DB::Chunk SubstraitFileSource::generate()
@@ -212,8 +201,8 @@ DB::Field FileReaderWrapper::buildFieldFromString(const String & str_value, DB::
            {"Int16", BUILD_INT_FIELD(Int16)},
            {"Int32", BUILD_INT_FIELD(Int32)},
            {"Int64", BUILD_INT_FIELD(Int64)},
-           {"Float32", BUILD_FP_FIELD(DB::Float32)},
-           {"Float64", BUILD_FP_FIELD(DB::Float64)},
+           {"Float32", BUILD_FP_FIELD(Float32)},
+           {"Float64", BUILD_FP_FIELD(Float64)},
            {"String", [](DB::ReadBuffer &, const String & val) { return DB::Field(val); }},
            {"Date",
             [](DB::ReadBuffer & in, const String &)
@@ -351,19 +340,12 @@ NormalFileReader::NormalFileReader(
     : FileReaderWrapper(file_), context(context_), to_read_header(to_read_header_), output_header(output_header_)
 {
     input_format = file->createInputFormat(to_read_header);
-    DB::Pipe pipe(input_format->input);
-    pipeline = std::make_unique<DB::QueryPipeline>(std::move(pipe));
-    reader = std::make_unique<DB::PullingPipelineExecutor>(*pipeline);
 }
 
 bool NormalFileReader::pull(DB::Chunk & chunk)
 {
-    DB::Chunk raw_chunk;
-    auto status = reader->pull(raw_chunk);
-    if (!status)
-        return false;
-
-    size_t rows = raw_chunk.getNumRows();
+    DB::Chunk raw_chunk = input_format->input->generate();
+    auto rows = raw_chunk.getNumRows();
     if (!rows)
         return false;
 

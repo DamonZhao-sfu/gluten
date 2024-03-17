@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include <glog/logging.h>
+
 #include "compute/ProtobufUtils.h"
 #include "compute/ResultIterator.h"
 #include "memory/ArrowMemoryPool.h"
@@ -29,7 +31,6 @@
 #include "shuffle/ShuffleReader.h"
 #include "shuffle/ShuffleWriter.h"
 #include "substrait/plan.pb.h"
-#include "utils/DebugOut.h"
 #include "utils/ObjectStore.h"
 
 namespace gluten {
@@ -65,9 +66,14 @@ class Runtime : public std::enable_shared_from_this<Runtime> {
 
   /// Parse and cache the plan.
   /// Return true if parsed successfully.
-  virtual void parsePlan(const uint8_t* data, int32_t size, SparkTaskInfo taskInfo) = 0;
+  virtual void
+  parsePlan(const uint8_t* data, int32_t size, SparkTaskInfo taskInfo, std::optional<std::string> dumpFile) = 0;
 
   virtual std::string planString(bool details, const std::unordered_map<std::string, std::string>& sessionConf) = 0;
+
+  virtual void injectWriteFilesTempPath(const std::string& path) = 0;
+
+  virtual void parseSplitInfo(const uint8_t* data, int32_t size, std::optional<std::string> dumpFile) = 0;
 
   // Just for benchmark
   ::substrait::Plan& getPlan() {
@@ -100,9 +106,10 @@ class Runtime : public std::enable_shared_from_this<Runtime> {
 
   virtual std::shared_ptr<ShuffleWriter> createShuffleWriter(
       int numPartitions,
-      std::shared_ptr<ShuffleWriter::PartitionWriterCreator> partitionWriterCreator,
-      const ShuffleWriterOptions& options,
+      std::unique_ptr<PartitionWriter> partitionWriter,
+      ShuffleWriterOptions options,
       MemoryManager* memoryManager) = 0;
+
   virtual Metrics* getMetrics(ColumnarBatchIterator* rawIter, int64_t exportNanos) = 0;
 
   virtual std::shared_ptr<Datasource> createDatasource(
@@ -121,6 +128,8 @@ class Runtime : public std::enable_shared_from_this<Runtime> {
       arrow::MemoryPool* arrowPool,
       struct ArrowSchema* cSchema) = 0;
 
+  virtual void dumpConf(const std::string& path) = 0;
+
   const std::unordered_map<std::string, std::string>& getConfMap() {
     return confMap_;
   }
@@ -136,8 +145,10 @@ class Runtime : public std::enable_shared_from_this<Runtime> {
  protected:
   std::unique_ptr<ObjectStore> objStore_ = ObjectStore::create();
   ::substrait::Plan substraitPlan_;
+  std::vector<::substrait::ReadRel_LocalFiles> localFiles_;
+  std::optional<std::string> writeFilesTempPath_;
   SparkTaskInfo taskInfo_;
   // Session conf map
-  const std::unordered_map<std::string, std::string> confMap_;
+  std::unordered_map<std::string, std::string> confMap_;
 };
 } // namespace gluten

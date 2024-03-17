@@ -18,6 +18,7 @@
 #include <fstream>
 #include <iostream>
 #include <Builder/SerializedPlanBuilder.h>
+#include <Compression/CompressedReadBuffer.h>
 #include <Functions/FunctionFactory.h>
 #include <Interpreters/Context.h>
 #include <Interpreters/HashJoin.h>
@@ -46,11 +47,11 @@
 #include <Poco/Util/MapConfiguration.h>
 #include <Common/CHUtil.h>
 #include <Common/DebugUtils.h>
-#include <Common/Logger.h>
 #include <Common/MergeTreeTool.h>
 #include <Common/PODArray_fwd.h>
 #include <Common/Stopwatch.h>
 #include <Common/logger_useful.h>
+#include <Compression/CompressedReadBuffer.h>
 #include "testConfig.h"
 
 #if defined(__SSE2__)
@@ -63,110 +64,6 @@ using namespace dbms;
 
 DB::ContextMutablePtr global_context;
 
-[[maybe_unused]] static void BM_CHColumnToSparkRow(benchmark::State & state)
-{
-    for (auto _ : state)
-    {
-        state.PauseTiming();
-        dbms::SerializedSchemaBuilder schema_builder;
-        auto * schema = schema_builder.column("l_orderkey", "I64")
-                            .column("l_partkey", "I64")
-                            .column("l_suppkey", "I64")
-                            .column("l_linenumber", "I32")
-                            .column("l_quantity", "FP64")
-                            .column("l_extendedprice", "FP64")
-                            .column("l_discount", "FP64")
-                            .column("l_tax", "FP64")
-                            .column("l_returnflag", "String")
-                            .column("l_linestatus", "String")
-                            .column("l_shipdate", "Date")
-                            .column("l_commitdate", "Date")
-                            .column("l_receiptdate", "Date")
-                            .column("l_shipinstruct", "String")
-                            .column("l_shipmode", "String")
-                            .column("l_comment", "String")
-                            .build();
-        dbms::SerializedPlanBuilder plan_builder;
-        auto plan = plan_builder.readMergeTree("default", "test", "home/saber/Documents/data/mergetree", 1, 10, std::move(schema)).build();
-        local_engine::SerializedPlanParser parser(global_context);
-        auto query_plan = parser.parse(std::move(plan));
-        local_engine::LocalExecutor local_executor;
-        state.ResumeTiming();
-        local_executor.execute(std::move(query_plan));
-        while (local_executor.hasNext())
-        {
-            local_engine::SparkRowInfoPtr spark_row_info = local_executor.next();
-        }
-    }
-}
-
-[[maybe_unused]] static void BM_MergeTreeRead(benchmark::State & state)
-{
-    std::shared_ptr<DB::StorageInMemoryMetadata> metadata = std::make_shared<DB::StorageInMemoryMetadata>();
-    ColumnsDescription columns_description;
-    auto int64_type = std::make_shared<DB::DataTypeInt64>();
-    auto int32_type = std::make_shared<DB::DataTypeInt32>();
-    auto double_type = std::make_shared<DB::DataTypeFloat64>();
-
-    const auto * type_string = "columns format version: 1\n"
-                               "3 columns:\n"
-                               "`l_orderkey` Int64\n"
-                               "`l_commitdate` Date\n"
-                               "`l_receiptdate` Date\n"
-                               "`l_shipinstruct` String\n"
-                               "`l_shipmode` String\n"
-                               "`l_comment` String\n";
-    auto names_and_types_list = NamesAndTypesList::parse(type_string);
-    metadata = local_engine::buildMetaData(names_and_types_list, global_context);
-    auto param = DB::MergeTreeData::MergingParams();
-    auto settings = local_engine::buildMergeTreeSettings();
-
-    local_engine::CustomStorageMergeTree custom_merge_tree(
-        DB::StorageID("default", "test"),
-        "data0/tpch100_zhichao/mergetree_nullable/lineitem",
-        *metadata,
-        false,
-        global_context,
-        "",
-        param,
-        std::move(settings));
-    auto snapshot = std::make_shared<StorageSnapshot>(custom_merge_tree, metadata);
-    custom_merge_tree.loadDataParts(false);
-    for (auto _ : state)
-    {
-        state.PauseTiming();
-        auto query_info = local_engine::buildQueryInfo(names_and_types_list);
-        auto data_parts = custom_merge_tree.getDataPartsVectorForInternalUsage();
-        int min_block = 0;
-        int max_block = state.range(0);
-        MergeTreeData::DataPartsVector selected_parts;
-        std::copy_if(
-            std::begin(data_parts),
-            std::end(data_parts),
-            std::inserter(selected_parts, std::begin(selected_parts)),
-            [min_block, max_block](MergeTreeData::DataPartPtr part)
-            { return part->info.min_block >= min_block && part->info.max_block <= max_block; });
-        auto step = custom_merge_tree.reader.readFromParts(
-            selected_parts, {}, names_and_types_list.getNames(), snapshot, *query_info, global_context, 10000, 1);
-
-        auto query_plan = QueryPlan();
-        query_plan.addStep(std::move(step));
-
-        QueryPlanOptimizationSettings optimization_settings{.optimize_plan = false};
-        auto query_pipeline = query_plan.buildQueryPipeline(optimization_settings, {});
-
-        state.ResumeTiming();
-        auto pipeline = QueryPipelineBuilder::getPipeline(std::move(*query_pipeline));
-        auto executor = PullingPipelineExecutor(pipeline);
-        Chunk chunk;
-        int sum = 0;
-        while (executor.pull(chunk))
-        {
-            sum += chunk.getNumRows();
-        }
-        std::cerr << "rows:" << sum << std::endl;
-    }
-}
 
 [[maybe_unused]] static void BM_ParquetRead(benchmark::State & state)
 {
@@ -211,190 +108,13 @@ DB::ContextMutablePtr global_context;
     }
 }
 
-[[maybe_unused]] static void BM_ShuffleSplitter(benchmark::State & state)
-{
-    std::shared_ptr<DB::StorageInMemoryMetadata> metadata = std::make_shared<DB::StorageInMemoryMetadata>();
-    ColumnsDescription columns_description;
-    auto int64_type = std::make_shared<DB::DataTypeInt64>();
-    auto int32_type = std::make_shared<DB::DataTypeInt32>();
-    auto double_type = std::make_shared<DB::DataTypeFloat64>();
-    const auto * type_string = "columns format version: 1\n"
-                               "15 columns:\n"
-                               "`l_partkey` Int64\n"
-                               "`l_suppkey` Int64\n"
-                               "`l_linenumber` Int32\n"
-                               "`l_quantity` Float64\n"
-                               "`l_extendedprice` Float64\n"
-                               "`l_discount` Float64\n"
-                               "`l_tax` Float64\n"
-                               "`l_returnflag` String\n"
-                               "`l_linestatus` String\n"
-                               "`l_shipdate` Date\n"
-                               "`l_commitdate` Date\n"
-                               "`l_receiptdate` Date\n"
-                               "`l_shipinstruct` String\n"
-                               "`l_shipmode` String\n"
-                               "`l_comment` String\n";
-    auto names_and_types_list = NamesAndTypesList::parse(type_string);
-    metadata = local_engine::buildMetaData(names_and_types_list, global_context);
-    auto param = DB::MergeTreeData::MergingParams();
-    auto settings = local_engine::buildMergeTreeSettings();
-
-    local_engine::CustomStorageMergeTree custom_merge_tree(
-        DB::StorageID("default", "test"),
-        "home/saber/Documents/data/mergetree",
-        *metadata,
-        false,
-        global_context,
-        "",
-        param,
-        std::move(settings));
-    custom_merge_tree.loadDataParts(false);
-    auto snapshot = std::make_shared<StorageSnapshot>(custom_merge_tree, metadata);
-    for (auto _ : state)
-    {
-        state.PauseTiming();
-        auto query_info = local_engine::buildQueryInfo(names_and_types_list);
-        auto data_parts = custom_merge_tree.getDataPartsVectorForInternalUsage();
-        int min_block = 0;
-        int max_block = state.range(0);
-        MergeTreeData::DataPartsVector selected_parts;
-        std::copy_if(
-            std::begin(data_parts),
-            std::end(data_parts),
-            std::inserter(selected_parts, std::begin(selected_parts)),
-            [min_block, max_block](MergeTreeData::DataPartPtr part)
-            { return part->info.min_block >= min_block && part->info.max_block <= max_block; });
-
-        auto step = custom_merge_tree.reader.readFromParts(
-            selected_parts, {}, names_and_types_list.getNames(), snapshot, *query_info, global_context, 10000, 1);
-        auto query_plan = QueryPlan();
-        query_plan.addStep(std::move(step));
-
-        QueryPlanOptimizationSettings optimization_settings{.optimize_plan = false};
-        auto query_pipeline = query_plan.buildQueryPipeline(optimization_settings, {});
-
-        auto pipeline = QueryPipelineBuilder::getPipeline(std::move(*query_pipeline));
-        state.ResumeTiming();
-        auto executor = PullingPipelineExecutor(pipeline);
-        Block chunk = executor.getHeader();
-        int sum = 0;
-        auto root = "/tmp/test_shuffle/" + local_engine::ShuffleSplitter::compress_methods[state.range(1)];
-        local_engine::SplitOptions options{
-            .split_size = 8192,
-            .io_buffer_size = DBMS_DEFAULT_BUFFER_SIZE,
-            .data_file = root + "/data.dat",
-            .map_id = 1,
-            .partition_num = 4,
-            .compress_method = local_engine::ShuffleSplitter::compress_methods[state.range(1)]};
-        auto splitter = local_engine::ShuffleSplitter::create("rr", options);
-        while (executor.pull(chunk))
-        {
-            sum += chunk.rows();
-            splitter->split(chunk);
-        }
-        splitter->stop();
-        splitter->writeIndexFile();
-        std::cout << sum << "\n";
-    }
-}
-
-[[maybe_unused]] static void BM_HashShuffleSplitter(benchmark::State & state)
-{
-    std::shared_ptr<DB::StorageInMemoryMetadata> metadata = std::make_shared<DB::StorageInMemoryMetadata>();
-    ColumnsDescription columns_description;
-    auto int64_type = std::make_shared<DB::DataTypeInt64>();
-    auto int32_type = std::make_shared<DB::DataTypeInt32>();
-    auto double_type = std::make_shared<DB::DataTypeFloat64>();
-    const auto * type_string = "columns format version: 1\n"
-                               "15 columns:\n"
-                               "`l_partkey` Int64\n"
-                               "`l_suppkey` Int64\n"
-                               "`l_linenumber` Int32\n"
-                               "`l_quantity` Float64\n"
-                               "`l_extendedprice` Float64\n"
-                               "`l_discount` Float64\n"
-                               "`l_tax` Float64\n"
-                               "`l_returnflag` String\n"
-                               "`l_linestatus` String\n"
-                               "`l_shipdate` Date\n"
-                               "`l_commitdate` Date\n"
-                               "`l_receiptdate` Date\n"
-                               "`l_shipinstruct` String\n"
-                               "`l_shipmode` String\n"
-                               "`l_comment` String\n";
-    auto names_and_types_list = NamesAndTypesList::parse(type_string);
-    metadata = local_engine::buildMetaData(names_and_types_list, global_context);
-    auto param = DB::MergeTreeData::MergingParams();
-    auto settings = local_engine::buildMergeTreeSettings();
-
-    local_engine::CustomStorageMergeTree custom_merge_tree(
-        DB::StorageID("default", "test"),
-        "home/saber/Documents/data/mergetree",
-        *metadata,
-        false,
-        global_context,
-        "",
-        param,
-        std::move(settings));
-    custom_merge_tree.loadDataParts(false);
-    auto snapshot = std::make_shared<StorageSnapshot>(custom_merge_tree, metadata);
-
-    for (auto _ : state)
-    {
-        state.PauseTiming();
-        auto query_info = local_engine::buildQueryInfo(names_and_types_list);
-        auto data_parts = custom_merge_tree.getDataPartsVectorForInternalUsage();
-        int min_block = 0;
-        int max_block = state.range(0);
-        MergeTreeData::DataPartsVector selected_parts;
-        std::copy_if(
-            std::begin(data_parts),
-            std::end(data_parts),
-            std::inserter(selected_parts, std::begin(selected_parts)),
-            [min_block, max_block](MergeTreeData::DataPartPtr part)
-            { return part->info.min_block >= min_block && part->info.max_block <= max_block; });
-
-        auto step = custom_merge_tree.reader.readFromParts(
-            selected_parts, {}, names_and_types_list.getNames(), snapshot, *query_info, global_context, 10000, 1);
-        auto query_plan = QueryPlan();
-        query_plan.addStep(std::move(step));
-
-        QueryPlanOptimizationSettings optimization_settings{.optimize_plan = false};
-        auto query_pipeline = query_plan.buildQueryPipeline(optimization_settings, {});
-
-        auto pipeline = QueryPipelineBuilder::getPipeline(std::move(*query_pipeline));
-        state.ResumeTiming();
-        auto executor = PullingPipelineExecutor(pipeline);
-        Block chunk = executor.getHeader();
-        int sum = 0;
-        auto root = "/tmp/test_shuffle/" + local_engine::ShuffleSplitter::compress_methods[state.range(1)];
-        local_engine::SplitOptions options{
-            .split_size = 8192,
-            .io_buffer_size = DBMS_DEFAULT_BUFFER_SIZE,
-            .data_file = root + "/data.dat",
-            .map_id = 1,
-            .partition_num = 4,
-            .compress_method = local_engine::ShuffleSplitter::compress_methods[state.range(1)]};
-        auto splitter = local_engine::ShuffleSplitter::create("hash", options);
-        while (executor.pull(chunk))
-        {
-            sum += chunk.rows();
-            splitter->split(chunk);
-        }
-        splitter->stop();
-        splitter->writeIndexFile();
-        std::cout << sum << "\n";
-    }
-}
-
 [[maybe_unused]] static void BM_ShuffleReader(benchmark::State & state)
 {
     for (auto _ : state)
     {
         auto read_buffer = std::make_unique<ReadBufferFromFile>("/tmp/test_shuffle/ZSTD/data.dat");
         //        read_buffer->seek(357841655, SEEK_SET);
-        auto shuffle_reader = local_engine::ShuffleReader(std::move(read_buffer), true);
+        auto shuffle_reader = local_engine::ShuffleReader(std::move(read_buffer), true, -1, -1);
         Block * block;
         int sum = 0;
         do
@@ -504,120 +224,6 @@ DB::ContextMutablePtr global_context;
         }
     }
 }
-
-
-[[maybe_unused]] static void BM_MERGE_TREE_TPCH_Q6(benchmark::State & state)
-{
-    SerializedPlanParser::global_context = global_context;
-    local_engine::SerializedPlanParser parser(SerializedPlanParser::global_context);
-    for (auto _ : state)
-    {
-        state.PauseTiming();
-        dbms::SerializedSchemaBuilder schema_builder;
-        auto * schema = schema_builder.column("l_discount", "FP64")
-                            .column("l_extendedprice", "FP64")
-                            .column("l_quantity", "FP64")
-                            .column("l_shipdate", "Date")
-                            .build();
-        dbms::SerializedPlanBuilder plan_builder;
-        auto * agg_mul = dbms::scalarFunction(dbms::MULTIPLY, {dbms::selection(1), dbms::selection(0)});
-        auto * measure1 = dbms::measureFunction(dbms::SUM, {agg_mul});
-        auto plan = plan_builder.registerSupportedFunctions()
-                        .aggregate({}, {measure1})
-                        .project({dbms::selection(2), dbms::selection(1), dbms::selection(0)})
-                        .filter(dbms::scalarFunction(
-                            dbms::AND,
-                            {dbms::scalarFunction(
-                                 AND,
-                                 {dbms::scalarFunction(
-                                      AND,
-                                      {dbms::scalarFunction(
-                                           AND,
-                                           {dbms::scalarFunction(
-                                                AND,
-                                                {dbms::scalarFunction(
-                                                     AND,
-                                                     {dbms::scalarFunction(
-                                                          AND,
-                                                          {scalarFunction(IS_NOT_NULL, {selection(3)}),
-                                                           scalarFunction(IS_NOT_NULL, {selection(0)})}),
-                                                      scalarFunction(IS_NOT_NULL, {selection(2)})}),
-                                                 dbms::scalarFunction(GREATER_THAN_OR_EQUAL, {selection(3), literalDate(8766)})}),
-                                            scalarFunction(LESS_THAN, {selection(3), literalDate(9131)})}),
-                                       scalarFunction(GREATER_THAN_OR_EQUAL, {selection(0), literal(0.05)})}),
-                                  scalarFunction(LESS_THAN_OR_EQUAL, {selection(0), literal(0.07)})}),
-                             scalarFunction(LESS_THAN, {selection(2), literal(24.0)})}))
-                        .readMergeTree("default", "test", "home/saber/Documents/data/mergetree/", 1, 4, std::move(schema))
-                        .build();
-
-        auto query_plan = parser.parse(std::move(plan));
-        local_engine::LocalExecutor local_executor;
-        state.ResumeTiming();
-        local_executor.execute(std::move(query_plan));
-        while (local_executor.hasNext())
-        {
-            local_engine::SparkRowInfoPtr spark_row_info = local_executor.next();
-        }
-    }
-}
-
-[[maybe_unused]] static void BM_MERGE_TREE_TPCH_Q6_NEW(benchmark::State & state)
-{
-    SerializedPlanParser::global_context = global_context;
-    local_engine::SerializedPlanParser parser(SerializedPlanParser::global_context);
-    for (auto _ : state)
-    {
-        state.PauseTiming();
-        dbms::SerializedSchemaBuilder schema_builder;
-        auto * schema = schema_builder.column("l_discount", "FP64")
-                            .column("l_extendedprice", "FP64")
-                            .column("l_quantity", "FP64")
-                            .column("l_shipdate", "Date")
-                            .build();
-        dbms::SerializedPlanBuilder plan_builder;
-        auto * agg_mul = dbms::scalarFunction(dbms::MULTIPLY, {dbms::selection(1), dbms::selection(0)});
-
-        auto * measure1 = dbms::measureFunction(dbms::SUM, {dbms::selection(0)});
-        auto plan = plan_builder.registerSupportedFunctions()
-                        .aggregate({}, {measure1})
-                        .project({agg_mul})
-                        .project({dbms::selection(2), dbms::selection(1), dbms::selection(0)})
-                        .filter(dbms::scalarFunction(
-                            dbms::AND,
-                            {dbms::scalarFunction(
-                                 AND,
-                                 {dbms::scalarFunction(
-                                      AND,
-                                      {dbms::scalarFunction(
-                                           AND,
-                                           {dbms::scalarFunction(
-                                                AND,
-                                                {dbms::scalarFunction(
-                                                     AND,
-                                                     {dbms::scalarFunction(
-                                                          AND,
-                                                          {scalarFunction(IS_NOT_NULL, {selection(3)}),
-                                                           scalarFunction(IS_NOT_NULL, {selection(0)})}),
-                                                      scalarFunction(IS_NOT_NULL, {selection(2)})}),
-                                                 dbms::scalarFunction(GREATER_THAN_OR_EQUAL, {selection(3), literalDate(8766)})}),
-                                            scalarFunction(LESS_THAN, {selection(3), literalDate(9131)})}),
-                                       scalarFunction(GREATER_THAN_OR_EQUAL, {selection(0), literal(0.05)})}),
-                                  scalarFunction(LESS_THAN_OR_EQUAL, {selection(0), literal(0.07)})}),
-                             scalarFunction(LESS_THAN, {selection(2), literal(24.0)})}))
-                        .readMergeTree("default", "test", "home/saber/Documents/data/mergetree/", 1, 4, std::move(schema))
-                        .build();
-
-        auto query_plan = parser.parse(std::move(plan));
-        local_engine::LocalExecutor local_executor;
-        state.ResumeTiming();
-        local_executor.execute(std::move(query_plan));
-        while (local_executor.hasNext())
-        {
-            local_engine::SparkRowInfoPtr spark_row_info = local_executor.next();
-        }
-    }
-}
-
 
 [[maybe_unused]] static void BM_MERGE_TREE_TPCH_Q6_FROM_TEXT(benchmark::State & state)
 {
@@ -788,9 +394,9 @@ DB::ContextMutablePtr global_context;
         PaddedPODArray<Int32> arr;
         PaddedPODArray<UInt8> condition;
         PaddedPODArray<Int32> res_data;
-        arr.reserve(n);
-        condition.reserve(n);
-        res_data.reserve(n);
+        arr.reserve_exact(n);
+        condition.reserve_exact(n);
+        res_data.reserve_exact(n);
         for (int i = 0; i < n; i++)
         {
             arr.push_back(i);
@@ -841,9 +447,9 @@ DB::ContextMutablePtr global_context;
         PaddedPODArray<Int32> arr;
         PaddedPODArray<UInt8> condition;
         PaddedPODArray<Int32> res_data;
-        arr.reserve(n);
-        condition.reserve(n);
-        res_data.reserve(n);
+        arr.reserve_exact(n);
+        condition.reserve_exact(n);
+        res_data.reserve_exact(n);
         for (int i = 0; i < n; i++)
         {
             arr.push_back(i);
@@ -861,74 +467,6 @@ DB::ContextMutablePtr global_context;
             ++filt_pos;
             ++data_pos;
         }
-    }
-}
-
-[[maybe_unused]] static void BM_TestCreateExecute(benchmark::State & state)
-{
-    dbms::SerializedSchemaBuilder schema_builder;
-    auto * schema = schema_builder.column("l_discount", "FP64")
-                        .column("l_extendedprice", "FP64")
-                        .column("l_quantity", "FP64")
-                        .column("l_shipdate_new", "Date")
-                        .build();
-    dbms::SerializedPlanBuilder plan_builder;
-    auto * agg_mul = dbms::scalarFunction(dbms::MULTIPLY, {dbms::selection(1), dbms::selection(0)});
-    auto * measure1 = dbms::measureFunction(dbms::SUM, {agg_mul});
-    auto * measure2 = dbms::measureFunction(dbms::SUM, {dbms::selection(1)});
-    auto * measure3 = dbms::measureFunction(dbms::SUM, {dbms::selection(2)});
-    auto plan
-        = plan_builder.registerSupportedFunctions()
-              .aggregate({}, {measure1, measure2, measure3})
-              .project({dbms::selection(2), dbms::selection(1), dbms::selection(0)})
-              .filter(dbms::scalarFunction(
-                  dbms::AND,
-                  {dbms::scalarFunction(
-                       AND,
-                       {dbms::scalarFunction(
-                            AND,
-                            {dbms::scalarFunction(
-                                 AND,
-                                 {dbms::scalarFunction(
-                                      AND,
-                                      {dbms::scalarFunction(
-                                           AND,
-                                           {dbms::scalarFunction(
-                                                AND,
-                                                {scalarFunction(IS_NOT_NULL, {selection(3)}), scalarFunction(IS_NOT_NULL, {selection(0)})}),
-                                            scalarFunction(IS_NOT_NULL, {selection(2)})}),
-                                       dbms::scalarFunction(GREATER_THAN_OR_EQUAL, {selection(3), literalDate(8766)})}),
-                                  scalarFunction(LESS_THAN, {selection(3), literalDate(9131)})}),
-                             scalarFunction(GREATER_THAN_OR_EQUAL, {selection(0), literal(0.05)})}),
-                        scalarFunction(LESS_THAN_OR_EQUAL, {selection(0), literal(0.07)})}),
-                   scalarFunction(LESS_THAN, {selection(2), literal(24.0)})}))
-              .readMergeTree("default", "test", "home/saber/Documents/data/mergetree", 1, 4, std::move(schema))
-              .build();
-    std::string plan_string = plan->SerializeAsString();
-    local_engine::SerializedPlanParser::global_context = global_context;
-    local_engine::SerializedPlanParser::global_context->setConfig(local_engine::SerializedPlanParser::config);
-    for (auto _ : state)
-    {
-        Stopwatch stopwatch;
-        stopwatch.start();
-        auto context = Context::createCopy(local_engine::SerializedPlanParser::global_context);
-        context->setPath("/");
-        auto context_us = stopwatch.elapsedMicroseconds();
-        local_engine::SerializedPlanParser parser(context);
-        auto query_plan = parser.parse(plan_string);
-        auto parser_us = stopwatch.elapsedMicroseconds() - context_us;
-        auto query_context = local_engine::SerializedPlanParser::global_context;
-        local_engine::LocalExecutor * executor = new local_engine::LocalExecutor(parser.query_context, query_context);
-        auto executor_us = stopwatch.elapsedMicroseconds() - parser_us;
-        executor->execute(std::move(query_plan));
-        auto execute_us = stopwatch.elapsedMicroseconds() - executor_us;
-        LOG_DEBUG(
-            &Poco::Logger::root(),
-            "create context: {}, create parser: {}, create executor: {}, execute executor: {}",
-            context_us,
-            parser_us,
-            executor_us,
-            execute_us);
     }
 }
 
@@ -1278,103 +816,12 @@ public:
 
 #include <Parser/CHColumnToSparkRow.h>
 
-[[maybe_unused]] static void BM_CHColumnToSparkRowNew(benchmark::State & state)
-{
-    std::shared_ptr<DB::StorageInMemoryMetadata> metadata = std::make_shared<DB::StorageInMemoryMetadata>();
-    ColumnsDescription columns_description;
-    auto int64_type = std::make_shared<DB::DataTypeInt64>();
-    auto int32_type = std::make_shared<DB::DataTypeInt32>();
-    auto double_type = std::make_shared<DB::DataTypeFloat64>();
-    const auto * type_string = "columns format version: 1\n"
-                               "15 columns:\n"
-                               "`l_partkey` Int64\n"
-                               "`l_suppkey` Int64\n"
-                               "`l_linenumber` Int32\n"
-                               "`l_quantity` Float64\n"
-                               "`l_extendedprice` Float64\n"
-                               "`l_discount` Float64\n"
-                               "`l_tax` Float64\n"
-                               "`l_returnflag` String\n"
-                               "`l_linestatus` String\n"
-                               "`l_shipdate` Date\n"
-                               "`l_commitdate` Date\n"
-                               "`l_receiptdate` Date\n"
-                               "`l_shipinstruct` String\n"
-                               "`l_shipmode` String\n"
-                               "`l_comment` String\n";
-    auto names_and_types_list = NamesAndTypesList::parse(type_string);
-    metadata = local_engine::buildMetaData(names_and_types_list, global_context);
-    auto param = DB::MergeTreeData::MergingParams();
-    auto settings = local_engine::buildMergeTreeSettings();
-
-    local_engine::CustomStorageMergeTree custom_merge_tree(
-        DB::StorageID("default", "test"),
-        "data1/tpc_data/tpch10_liuneng/mergetree/lineitem",
-        *metadata,
-        false,
-        global_context,
-        "",
-        param,
-        std::move(settings));
-    auto snapshot = std::make_shared<StorageSnapshot>(custom_merge_tree, metadata);
-    custom_merge_tree.loadDataParts(false);
-    for (auto _ : state)
-    {
-        state.PauseTiming();
-        auto query_info = local_engine::buildQueryInfo(names_and_types_list);
-        auto data_parts = custom_merge_tree.getDataPartsVectorForInternalUsage();
-        int min_block = 0;
-        int max_block = 10;
-        MergeTreeData::DataPartsVector selected_parts;
-        std::copy_if(
-            std::begin(data_parts),
-            std::end(data_parts),
-            std::inserter(selected_parts, std::begin(selected_parts)),
-            [min_block, max_block](MergeTreeData::DataPartPtr part)
-            { return part->info.min_block >= min_block && part->info.max_block <= max_block; });
-
-        auto step = custom_merge_tree.reader.readFromParts(
-            selected_parts, {}, names_and_types_list.getNames(), snapshot, *query_info, global_context, 10000, 1);
-        auto query_plan = QueryPlan();
-        query_plan.addStep(std::move(step));
-
-        QueryPlanOptimizationSettings optimization_settings{.optimize_plan = false};
-        auto query_pipeline = query_plan.buildQueryPipeline(optimization_settings, {});
-
-        state.ResumeTiming();
-        auto pipeline = QueryPipelineBuilder::getPipeline(std::move(*query_pipeline));
-        auto executor = PullingPipelineExecutor(pipeline);
-        Block header = executor.getHeader();
-        CHColumnToSparkRow converter;
-        int sum = 0;
-        while (executor.pull(header))
-        {
-            sum += header.rows();
-            auto spark_row = converter.convertCHColumnToSparkRow(header);
-            converter.freeMem(spark_row->getBufferAddress(), spark_row->getTotalBytes());
-        }
-        std::cerr << "rows: " << sum << std::endl;
-    }
-}
-
 struct MergeTreeWithSnapshot
 {
     std::shared_ptr<local_engine::CustomStorageMergeTree> merge_tree;
     std::shared_ptr<StorageSnapshot> snapshot;
     NamesAndTypesList columns;
 };
-
-MergeTreeWithSnapshot buildMergeTree(NamesAndTypesList names_and_types, std::string relative_path, std::string table)
-{
-    auto metadata = local_engine::buildMetaData(names_and_types, global_context);
-    auto param = DB::MergeTreeData::MergingParams();
-    auto settings = local_engine::buildMergeTreeSettings();
-    std::shared_ptr<local_engine::CustomStorageMergeTree> custom_merge_tree = std::make_shared<local_engine::CustomStorageMergeTree>(
-        DB::StorageID("default", table), relative_path, *metadata, false, global_context, "", param, std::move(settings));
-    auto snapshot = std::make_shared<StorageSnapshot>(*custom_merge_tree, metadata);
-    custom_merge_tree->loadDataParts(false);
-    return MergeTreeWithSnapshot{.merge_tree = custom_merge_tree, .snapshot = snapshot, .columns = names_and_types};
-}
 
 QueryPlanPtr readFromMergeTree(MergeTreeWithSnapshot storage)
 {
@@ -1398,7 +845,7 @@ QueryPlanPtr joinPlan(QueryPlanPtr left, QueryPlanPtr right, String left_key, St
     join->addDisjunct();
     ASTPtr lkey = std::make_shared<ASTIdentifier>(left_key);
     ASTPtr rkey = std::make_shared<ASTIdentifier>(right_key);
-    join->addOnKeys(lkey, rkey);
+    join->addOnKeys(lkey, rkey, true);
     for (const auto & column : join->columnsFromJoinedTable())
     {
         join->addJoinedColumn(column);
@@ -1435,61 +882,6 @@ QueryPlanPtr joinPlan(QueryPlanPtr left, QueryPlanPtr right, String left_key, St
     auto query_plan = std::make_unique<QueryPlan>();
     query_plan->unitePlans(std::move(join_step), std::move(plans));
     return query_plan;
-}
-
-[[maybe_unused]] static void BM_JoinTest(benchmark::State & state)
-{
-    std::shared_ptr<DB::StorageInMemoryMetadata> metadata = std::make_shared<DB::StorageInMemoryMetadata>();
-    ColumnsDescription columns_description;
-    auto int64_type = std::make_shared<DB::DataTypeInt64>();
-    auto int32_type = std::make_shared<DB::DataTypeInt32>();
-    auto double_type = std::make_shared<DB::DataTypeFloat64>();
-    const auto * supplier_type_string = "columns format version: 1\n"
-                                        "2 columns:\n"
-                                        "`s_suppkey` Int64\n"
-                                        "`s_nationkey` Int64\n";
-    auto supplier_types = NamesAndTypesList::parse(supplier_type_string);
-    auto supplier = buildMergeTree(supplier_types, "home/saber/Documents/data/tpch/mergetree/supplier", "supplier");
-
-    const auto * nation_type_string = "columns format version: 1\n"
-                                      "1 columns:\n"
-                                      "`n_nationkey` Int64\n";
-    auto nation_types = NamesAndTypesList::parse(nation_type_string);
-    auto nation = buildMergeTree(nation_types, "home/saber/Documents/data/tpch/mergetree/nation", "nation");
-
-
-    const auto * partsupp_type_string = "columns format version: 1\n"
-                                        "3 columns:\n"
-                                        "`ps_suppkey` Int64\n"
-                                        "`ps_availqty` Int64\n"
-                                        "`ps_supplycost` Float64\n";
-    auto partsupp_types = NamesAndTypesList::parse(partsupp_type_string);
-    auto partsupp = buildMergeTree(partsupp_types, "home/saber/Documents/data/tpch/mergetree/partsupp", "partsupp");
-
-    for (auto _ : state)
-    {
-        state.PauseTiming();
-        QueryPlanPtr supplier_query;
-        {
-            auto left = readFromMergeTree(partsupp);
-            auto right = readFromMergeTree(supplier);
-            supplier_query = joinPlan(std::move(left), std::move(right), "ps_suppkey", "s_suppkey");
-        }
-        auto right = readFromMergeTree(nation);
-        auto query_plan = joinPlan(std::move(supplier_query), std::move(right), "s_nationkey", "n_nationkey");
-        QueryPlanOptimizationSettings optimization_settings{.optimize_plan = false};
-        BuildQueryPipelineSettings pipeline_settings;
-        auto pipeline_builder = query_plan->buildQueryPipeline(optimization_settings, pipeline_settings);
-        state.ResumeTiming();
-        auto pipeline = QueryPipelineBuilder::getPipeline(std::move(*pipeline_builder));
-        auto executor = PullingPipelineExecutor(pipeline);
-        Block header = executor.getHeader();
-        [[maybe_unused]] int sum = 0;
-        while (executor.pull(header))
-        {
-            sum += header.rows();
-        }
-    }
 }
 
 BENCHMARK(BM_ParquetRead)->Unit(benchmark::kMillisecond)->Iterations(10);

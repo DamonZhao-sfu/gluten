@@ -17,7 +17,8 @@
 package org.apache.spark.sql.execution
 
 import io.glutenproject.execution.WholeStageTransformer
-import io.glutenproject.extension.{GlutenPlan, InMemoryTableScanHelper}
+import io.glutenproject.extension.GlutenPlan
+import io.glutenproject.utils.PlanUtil
 
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.expressions.{Expression, PlanExpression}
@@ -84,15 +85,19 @@ object GlutenExplainUtils extends AdaptiveSparkPlanHelper {
         case _: WholeStageCodegenExec =>
         case _: WholeStageTransformer =>
         case _: InputAdapter =>
+        case _: ColumnarInputAdapter =>
         case _: InputIteratorTransformer =>
         case _: ColumnarToRowTransition =>
         case _: RowToColumnarTransition =>
+        case _: ReusedExchangeExec =>
+        case sub: AdaptiveSparkPlanExec if sub.isSubquery => collect(sub.executedPlan)
+        case _: AdaptiveSparkPlanExec =>
         case p: QueryStageExec => collect(p.plan)
         case p: GlutenPlan =>
           numGlutenNodes += 1
           p.innerChildren.foreach(collect)
         case i: InMemoryTableScanExec =>
-          if (InMemoryTableScanHelper.isGlutenTableCache(i)) {
+          if (PlanUtil.isGlutenTableCache(i)) {
             numGlutenNodes += 1
           } else {
             addFallbackNodeWithReason(i, "Columnar table cache is disabled", fallbackNodeToReason)
@@ -137,15 +142,17 @@ object GlutenExplainUtils extends AdaptiveSparkPlanHelper {
     }
   }
 
+  // spotless:off
+  // scalastyle:off
   /**
    * Given a input physical plan, performs the following tasks.
-   *   1. Generates the explain output for the input plan excluding the subquery plans. 2. Generates
-   *      the explain output for each subquery referenced in the plan.
+   *   1. Generates the explain output for the input plan excluding the subquery plans.
+   *   2. Generates the explain output for each subquery referenced in the plan.
    */
   def processPlan[T <: QueryPlan[T]](
       plan: T,
       append: String => Unit,
-      collectFallbackFunc: Option[QueryPlan[_] => FallbackInfo] = None): FallbackInfo = {
+      collectFallbackFunc: Option[QueryPlan[_] => FallbackInfo] = None): FallbackInfo = synchronized {
     try {
       // Initialize a reference-unique set of Operators to avoid accdiental overwrites and to allow
       // intentional overwriting of IDs generated in previous AQE iteration
@@ -211,15 +218,22 @@ object GlutenExplainUtils extends AdaptiveSparkPlanHelper {
           append("\n")
       }
 
-      if (collectFallbackFunc.isEmpty) {
-        collectFallbackNodes(plan)
-      } else {
-        collectFallbackFunc.get.apply(plan)
-      }
+      (subqueries.filter(!_._3.isInstanceOf[ReusedSubqueryExec]).map(_._3.child) :+ plan)
+        .map {
+          plan =>
+            if (collectFallbackFunc.isEmpty) {
+              collectFallbackNodes(plan)
+            } else {
+              collectFallbackFunc.get.apply(plan)
+            }
+        }
+        .reduce((a, b) => (a._1 + b._1, a._2 ++ b._2))
     } finally {
       removeTags(plan)
     }
   }
+  // scalastyle:on
+  // spotless:on
 
   /**
    * Traverses the supplied input plan in a bottom-up fashion and records the operator id via

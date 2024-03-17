@@ -19,15 +19,12 @@
 
 #include "SubstraitToVeloxExpr.h"
 #include "TypeUtils.h"
-#include "velox/connectors/hive/HiveConnector.h"
 #include "velox/connectors/hive/TableHandle.h"
 #include "velox/core/PlanNode.h"
 #include "velox/dwio/common/Options.h"
 
 namespace gluten {
-
-// Holds names of Spark OffsetWindowFunctions.
-static const std::unordered_set<std::string> kOffsetWindowFunctions = {"nth_value"};
+class ResultIterator;
 
 struct SplitInfo {
   /// Whether the split comes from arrow array stream node.
@@ -38,6 +35,9 @@ struct SplitInfo {
 
   /// The partition columns associated with partitioned table.
   std::vector<std::unordered_map<std::string, std::string>> partitionColumns;
+
+  /// The metadata columns associated with partitioned table.
+  std::vector<std::unordered_map<std::string, std::string>> metadataColumns;
 
   /// The file paths to be scanned.
   std::vector<std::string> paths;
@@ -50,6 +50,9 @@ struct SplitInfo {
 
   /// The file format of the files to be scanned.
   dwio::common::FileFormat format;
+
+  /// Make SplitInfo polymorphic
+  virtual ~SplitInfo() = default;
 };
 
 /// This class is used to convert the Substrait plan into Velox plan.
@@ -58,8 +61,12 @@ class SubstraitToVeloxPlanConverter {
   SubstraitToVeloxPlanConverter(
       memory::MemoryPool* pool,
       const std::unordered_map<std::string, std::string>& confMap = {},
+      const std::optional<std::string> writeFilesTempPath = std::nullopt,
       bool validationMode = false)
-      : pool_(pool), confMap_(confMap), validationMode_(validationMode) {}
+      : pool_(pool), confMap_(confMap), writeFilesTempPath_(writeFilesTempPath), validationMode_(validationMode) {}
+
+  /// Used to convert Substrait WriteRel into Velox PlanNode.
+  core::PlanNodePtr toVeloxPlan(const ::substrait::WriteRel& writeRel);
 
   /// Used to convert Substrait ExpandRel into Velox PlanNode.
   core::PlanNodePtr toVeloxPlan(const ::substrait::ExpandRel& expandRel);
@@ -72,6 +79,9 @@ class SubstraitToVeloxPlanConverter {
 
   /// Used to convert Substrait JoinRel into Velox PlanNode.
   core::PlanNodePtr toVeloxPlan(const ::substrait::JoinRel& joinRel);
+
+  /// Used to convert Substrait CrossRel into Velox PlanNode.
+  core::PlanNodePtr toVeloxPlan(const ::substrait::CrossRel& crossRel);
 
   /// Used to convert Substrait AggregateRel into Velox PlanNode.
   core::PlanNodePtr toVeloxPlan(const ::substrait::AggregateRel& aggRel);
@@ -97,6 +107,8 @@ class SubstraitToVeloxPlanConverter {
   /// Starts: the start positions in byte to read from the items.
   /// Lengths: the lengths in byte to read from the items.
   core::PlanNodePtr toVeloxPlan(const ::substrait::ReadRel& sRead);
+
+  core::PlanNodePtr constructValueStreamNode(const ::substrait::ReadRel& sRead, int32_t streamIdx);
 
   /// Used to convert Substrait Rel into Velox PlanNode.
   core::PlanNodePtr toVeloxPlan(const ::substrait::Rel& sRel);
@@ -134,6 +146,15 @@ class SubstraitToVeloxPlanConverter {
     planNodeId_ = planNodeId;
   }
 
+  void setSplitInfos(std::vector<std::shared_ptr<SplitInfo>> splitInfos) {
+    splitInfos_ = splitInfos;
+  }
+
+  void setValueStreamNodeFactory(
+      std::function<core::PlanNodePtr(std::string, memory::MemoryPool*, int32_t, RowTypePtr)> factory) {
+    valueStreamNodeFactory_ = std::move(factory);
+  }
+
   /// Used to check if ReadRel specifies an input of stream.
   /// If yes, the index of input stream will be returned.
   /// If not, -1 will be returned.
@@ -153,7 +174,17 @@ class SubstraitToVeloxPlanConverter {
       std::vector<const ::substrait::Expression::FieldReference*>& rightExprs);
 
   /// Get aggregation step from AggregateRel.
+  /// If returned Partial, it means the aggregate generated can leveraging flushing and abandoning like
+  /// what streaming pre-aggregation can do in MPP databases.
   core::AggregationNode::Step toAggregationStep(const ::substrait::AggregateRel& sAgg);
+
+  /// Get aggregation function step for AggregateFunction.
+  /// The returned step value will be used to decide which Velox aggregate function or companion function
+  /// is used for the actual data processing.
+  core::AggregationNode::Step toAggregationFunctionStep(const ::substrait::AggregateFunction& sAggFuc);
+
+  /// We use companion functions if the aggregate is not single.
+  std::string toAggregationFunctionName(const std::string& baseName, const core::AggregationNode::Step& step);
 
   /// Helper Function to convert Substrait sortField to Velox sortingKeys and
   /// sortingOrders.
@@ -513,9 +544,6 @@ class SubstraitToVeloxPlanConverter {
   /// The unique identification for each PlanNode.
   int planNodeId_ = 0;
 
-  // used to check whether IsNotNull Filter is support
-  facebook::velox::dwio::common::FileFormat fileFormat_ = facebook::velox::dwio::common::FileFormat::UNKNOWN;
-
   /// The map storing the relations between the function id and the function
   /// name. Will be constructed based on the Substrait representation.
   std::unordered_map<uint64_t, std::string> functionMap_;
@@ -523,10 +551,15 @@ class SubstraitToVeloxPlanConverter {
   /// The map storing the split stats for each PlanNode.
   std::unordered_map<core::PlanNodeId, std::shared_ptr<SplitInfo>> splitInfoMap_;
 
+  std::function<core::PlanNodePtr(std::string, memory::MemoryPool*, int32_t, RowTypePtr)> valueStreamNodeFactory_;
+
   /// The map storing the pre-built plan nodes which can be accessed through
   /// index. This map is only used when the computation of a Substrait plan
   /// depends on other input nodes.
   std::unordered_map<uint64_t, std::shared_ptr<const core::PlanNode>> inputNodesMap_;
+
+  int32_t splitInfoIdx_{0};
+  std::vector<std::shared_ptr<SplitInfo>> splitInfos_;
 
   /// The Expression converter used to convert Substrait representations into
   /// Velox expressions.
@@ -537,6 +570,9 @@ class SubstraitToVeloxPlanConverter {
 
   /// A map of custom configs.
   std::unordered_map<std::string, std::string> confMap_;
+
+  /// The temporary path used to write files.
+  std::optional<std::string> writeFilesTempPath_;
 
   /// A flag used to specify validation.
   bool validationMode_ = false;

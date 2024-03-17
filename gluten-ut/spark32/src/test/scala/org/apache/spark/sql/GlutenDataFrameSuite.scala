@@ -19,7 +19,6 @@ package org.apache.spark.sql
 import io.glutenproject.execution.{ProjectExecTransformer, WholeStageTransformer}
 
 import org.apache.spark.SparkException
-import org.apache.spark.sql.GlutenTestConstants.GLUTEN_TEST
 import org.apache.spark.sql.catalyst.expressions.{EqualTo, Expression}
 import org.apache.spark.sql.execution.ColumnarShuffleExchangeExec
 import org.apache.spark.sql.execution.aggregate.HashAggregateExec
@@ -29,11 +28,13 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.test.SQLTestData.TestData2
 import org.apache.spark.sql.types.StringType
 
+import java.nio.charset.StandardCharsets
+
 import scala.util.Random
 
 class GlutenDataFrameSuite extends DataFrameSuite with GlutenSQLTestsTrait {
 
-  test(GlutenTestConstants.GLUTEN_TEST + "repartitionByRange") {
+  testGluten("repartitionByRange") {
     val partitionNum = 10
     withSQLConf(
       SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> "false",
@@ -92,7 +93,7 @@ class GlutenDataFrameSuite extends DataFrameSuite with GlutenSQLTestsTrait {
     }
   }
 
-  test(GlutenTestConstants.GLUTEN_TEST + "distributeBy and localSort") {
+  testGluten("distributeBy and localSort") {
     import testImplicits._
     val data = spark.sparkContext.parallelize((1 to 100).map(i => TestData2(i % 10, i))).toDF()
 
@@ -208,7 +209,7 @@ class GlutenDataFrameSuite extends DataFrameSuite with GlutenSQLTestsTrait {
     }
   }
 
-  test(GLUTEN_TEST + "reuse exchange") {
+  testGluten("reuse exchange") {
     withSQLConf(SQLConf.AUTO_BROADCASTJOIN_THRESHOLD.key -> "2") {
       val df = spark.range(100).toDF()
       val join = df.join(df, "id")
@@ -235,7 +236,7 @@ class GlutenDataFrameSuite extends DataFrameSuite with GlutenSQLTestsTrait {
   }
 
   /** Failed to check WholeStageCodegenExec, so we rewrite the UT. */
-  test(GLUTEN_TEST + "SPARK-22520: support code generation for large CaseWhen") {
+  testGluten("SPARK-22520: support code generation for large CaseWhen") {
     import org.apache.spark.sql.catalyst.dsl.expressions.StringToAttributeConversionHelper
     val N = 30
     var expr1 = when(equalizer($"id", lit(0)), 0)
@@ -259,7 +260,7 @@ class GlutenDataFrameSuite extends DataFrameSuite with GlutenSQLTestsTrait {
     ("David", 60, 192),
     ("Amy", 24, 180)).toDF("name", "age", "height")
 
-  test(GLUTEN_TEST + "describe") {
+  testGluten("describe") {
     val describeResult = Seq(
       Row("count", "4", "4", "4"),
       Row("mean", null, "33.0", "178.0"),
@@ -321,9 +322,7 @@ class GlutenDataFrameSuite extends DataFrameSuite with GlutenSQLTestsTrait {
     }
   }
 
-  test(
-    GLUTEN_TEST +
-      "Allow leading/trailing whitespace in string before casting") {
+  testGluten("Allow leading/trailing whitespace in string before casting") {
     def checkResult(df: DataFrame, expectedResult: Seq[Row]): Unit = {
       checkAnswer(df, expectedResult)
       assert(find(df.queryExecution.executedPlan)(_.isInstanceOf[ProjectExecTransformer]).isDefined)
@@ -355,7 +354,7 @@ class GlutenDataFrameSuite extends DataFrameSuite with GlutenSQLTestsTrait {
       Seq(" abc", "abc ", " abc ", "\u2000abc\n\n\n", "abc\r\r\r", "abc\f\f\f", "abc\u000C")
     // scalastyle:on nonascii
     rawData.toDF("col1").createOrReplaceTempView("t1")
-    val expectedBinaryResult = rawData.map(d => Row(d.getBytes())).seq
+    val expectedBinaryResult = rawData.map(d => Row(d.getBytes(StandardCharsets.UTF_8))).seq
     df = spark.sql("select cast(col1 as binary) from t1")
     checkResult(df, expectedBinaryResult)
   }

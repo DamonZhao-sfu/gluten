@@ -27,6 +27,7 @@
 #include <Processors/QueryPlan/QueryPlan.h>
 #include <base/types.h>
 #include <google/protobuf/repeated_field.h>
+#include <substrait/extensions/extensions.pb.h>
 #include <substrait/plan.pb.h>
 namespace local_engine
 {
@@ -45,15 +46,16 @@ public:
     const std::vector<IQueryPlanStep *> & getSteps() const { return steps; }
 
     static AggregateFunctionPtr getAggregateFunction(
-        const DB::String & name, DB::DataTypes arg_types, DB::AggregateFunctionProperties & properties, const DB::Array & parameters = {});
+        const String & name, DB::DataTypes arg_types, DB::AggregateFunctionProperties & properties, const DB::Array & parameters = {});
 
 protected:
-    inline SerializedPlanParser * getPlanParser() { return plan_parser; }
-    inline ContextPtr getContext() { return plan_parser->context; }
+    inline SerializedPlanParser * getPlanParser() const { return plan_parser; }
+    inline ContextPtr getContext() const { return plan_parser->context; }
 
     inline String getUniqueName(const std::string & name) { return plan_parser->getUniqueName(name); }
 
     inline const std::unordered_map<std::string, std::string> & getFunctionMapping() { return plan_parser->function_mapping; }
+
     // Get function signature name.
     std::optional<String> parseSignatureFunctionName(UInt32 function_ref);
     // Get coresponding function name in ClickHouse.
@@ -82,6 +84,9 @@ protected:
         return plan_parser->toFunctionNode(action_dag, function, args);
     }
 
+    static std::map<std::string, std::string> parseFormattedRelAdvancedOptimization(const substrait::extensions::AdvancedExtension &advanced_extension);
+    static std::string getStringConfig(const std::map<std::string, std::string> & configs, const std::string & key, const std::string & default_value = "");
+
 private:
     SerializedPlanParser * plan_parser;
 };
@@ -95,7 +100,7 @@ public:
     using RelParserBuilder = std::function<std::shared_ptr<RelParser>(SerializedPlanParser *)>;
     static RelParserFactory & instance();
     void registerBuilder(UInt32 k, RelParserBuilder builder);
-    RelParserBuilder getBuilder(DB::UInt32 k);
+    RelParserBuilder getBuilder(UInt32 k);
 
 private:
     std::map<UInt32, RelParserBuilder> builders;

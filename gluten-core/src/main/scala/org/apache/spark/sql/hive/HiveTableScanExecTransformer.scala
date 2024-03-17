@@ -17,23 +17,22 @@
 package org.apache.spark.sql.hive
 
 import io.glutenproject.backendsapi.BackendsApiManager
-import io.glutenproject.execution.{BasicScanExecTransformer, TransformContext}
+import io.glutenproject.execution.BasicScanExecTransformer
 import io.glutenproject.extension.ValidationResult
 import io.glutenproject.metrics.MetricsUpdater
-import io.glutenproject.substrait.SubstraitContext
 import io.glutenproject.substrait.rel.LocalFilesNode.ReadFileFormat
-import io.glutenproject.substrait.rel.ReadRelNode
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.catalog.HiveTableRelation
-import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, AttributeSeq, Expression}
+import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.connector.read.InputPartition
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.hive.HiveTableScanExecTransformer._
 import org.apache.spark.sql.hive.client.HiveClientImpl
-import org.apache.spark.sql.hive.execution.HiveTableScanExec
+import org.apache.spark.sql.hive.execution.{AbstractHiveTableScanExec, HiveTableScanExec}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.Utils
@@ -45,13 +44,11 @@ import org.apache.hadoop.mapred.TextInputFormat
 
 import java.net.URI
 
-import scala.collection.JavaConverters
-
-class HiveTableScanExecTransformer(
+case class HiveTableScanExecTransformer(
     requestedAttributes: Seq[Attribute],
     relation: HiveTableRelation,
     partitionPruningPred: Seq[Expression])(session: SparkSession)
-  extends HiveTableScanExec(requestedAttributes, relation, partitionPruningPred)(session)
+  extends AbstractHiveTableScanExec(requestedAttributes, relation, partitionPruningPred)(session)
   with BasicScanExecTransformer {
 
   @transient override lazy val metrics: Map[String, SQLMetric] =
@@ -65,6 +62,8 @@ class HiveTableScanExecTransformer(
     hiveQlTable.getMetadata)
 
   override def filterExprs(): Seq[Expression] = Seq.empty
+
+  override def getMetadataColumns(): Seq[AttributeReference] = Seq.empty
 
   override def outputAttributes(): Seq[Attribute] = output
 
@@ -137,65 +136,47 @@ class HiveTableScanExecTransformer(
     options
   }
 
-  override def doTransform(context: SubstraitContext): TransformContext = {
-    val transformCtx = super.doTransform(context)
-    if (
-      transformCtx.root != null
-      && transformCtx.root.isInstanceOf[ReadRelNode]
-    ) {
-      var properties: Map[String, String] = Map()
-      tableDesc.getProperties
-        .entrySet()
-        .forEach(e => properties += (e.getKey.toString -> e.getValue.toString))
+  override def getProperties: Map[String, String] = {
+    var properties: Map[String, String] = Map()
+    tableDesc.getProperties
+      .entrySet()
+      .forEach(e => properties += (e.getKey.toString -> e.getValue.toString))
 
-      var options: Map[String, String] = createDefaultTextOption()
-      // property key string read from org.apache.hadoop.hive.serde.serdeConstants
-      properties.foreach {
-        case ("separatorChar", v) =>
-          // If separatorChar, we should use default separatorChar
-          // for org.apache.hadoop.hive.serde2.OpenCSVSerde
-          // It ifx issue: https://github.com/oap-project/gluten/issues/3108
-          var nv = if (v.isEmpty()) "," else v
-          options += ("field_delimiter" -> nv)
-        case ("field.delim", v) =>
-          // If field.delim is empty, we should use default field delimiter
-          // for org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe
-          // It fixed issue: https://github.com/oap-project/gluten/issues/3108
-          var nv = if (v.isEmpty) DEFAULT_FIELD_DELIMITER.toString else v
-          options += ("field_delimiter" -> nv)
-        case ("quoteChar", v) => options += ("quote" -> v)
-        case ("quote.delim", v) => options += ("quote" -> v)
-        case ("skip.header.line.count", v) => options += ("header" -> v)
-        case ("escapeChar", v) => options += ("escape" -> v)
-        case ("escape.delim", v) => options += ("escape" -> v)
-        case ("serialization.null.format", v) => options += ("nullValue" -> v)
-        case (_, _) =>
-      }
-      val readRelNode = transformCtx.root.asInstanceOf[ReadRelNode]
-      readRelNode.setDataSchema(getDataSchema)
-      readRelNode.setProperties(JavaConverters.mapAsJavaMap(options))
+    var options: Map[String, String] = createDefaultTextOption()
+    // property key string read from org.apache.hadoop.hive.serde.serdeConstants
+    properties.foreach {
+      case ("separatorChar", v) =>
+        // If separatorChar, we should use default separatorChar
+        // for org.apache.hadoop.hive.serde2.OpenCSVSerde
+        // It fixed issue: https://github.com/oap-project/gluten/issues/3108
+        val nv = if (v.isEmpty) "," else v
+        options += ("field_delimiter" -> nv)
+      case ("field.delim", v) =>
+        // If field.delim is empty, we should use default field delimiter
+        // for org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe
+        // It fixed issue: https://github.com/oap-project/gluten/issues/3108
+        val nv = if (v.isEmpty) DEFAULT_FIELD_DELIMITER.toString else v
+        options += ("field_delimiter" -> nv)
+      case ("quoteChar", v) => options += ("quote" -> v)
+      case ("quote.delim", v) => options += ("quote" -> v)
+      case ("skip.header.line.count", v) => options += ("header" -> v)
+      case ("escapeChar", v) => options += ("escape" -> v)
+      case ("escape.delim", v) => options += ("escape" -> v)
+      case ("serialization.null.format", v) => options += ("nullValue" -> v)
+      case (_, _) =>
     }
-    transformCtx
+    options
   }
 
   override def nodeName: String = s"NativeScan hive ${relation.tableMeta.qualifiedName}"
 
-  override def canEqual(other: Any): Boolean = other.isInstanceOf[HiveTableScanExecTransformer]
-
-  override def equals(other: Any): Boolean = other match {
-    case that: HiveTableScanExecTransformer =>
-      that.canEqual(this) && super.equals(that)
-    case _ => false
-  }
-
-  override def hashCode(): Int = super.hashCode()
-
   override def doCanonicalize(): HiveTableScanExecTransformer = {
-    val canonicalized = super.doCanonicalize()
-    new HiveTableScanExecTransformer(
-      canonicalized.requestedAttributes,
-      canonicalized.relation,
-      canonicalized.partitionPruningPred)(canonicalized.session)
+    val input: AttributeSeq = relation.output
+    HiveTableScanExecTransformer(
+      requestedAttributes.map(QueryPlan.normalizeExpressions(_, input)),
+      relation.canonicalized.asInstanceOf[HiveTableRelation],
+      QueryPlan.normalizePredicates(partitionPruningPred, input)
+    )(sparkSession)
   }
 }
 

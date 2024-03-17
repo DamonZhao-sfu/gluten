@@ -25,7 +25,10 @@ class DummyRuntime final : public Runtime {
  public:
   DummyRuntime(const std::unordered_map<std::string, std::string>& conf) : Runtime(conf) {}
 
-  void parsePlan(const uint8_t* data, int32_t size, SparkTaskInfo taskInfo) override {}
+  void parsePlan(const uint8_t* data, int32_t size, SparkTaskInfo taskInfo, std::optional<std::string> dumpFile)
+      override {}
+
+  void parseSplitInfo(const uint8_t* data, int32_t size, std::optional<std::string> dumpFile) override {}
 
   std::shared_ptr<ResultIterator> createResultIterator(
       MemoryManager* memoryManager,
@@ -55,8 +58,8 @@ class DummyRuntime final : public Runtime {
   }
   std::shared_ptr<ShuffleWriter> createShuffleWriter(
       int numPartitions,
-      std::shared_ptr<ShuffleWriter::PartitionWriterCreator> partitionWriterCreator,
-      const ShuffleWriterOptions& options,
+      std::unique_ptr<PartitionWriter> partitionWriter,
+      ShuffleWriterOptions,
       MemoryManager* memoryManager) override {
     throw GlutenException("Not yet implemented");
   }
@@ -89,6 +92,13 @@ class DummyRuntime final : public Runtime {
   std::string planString(bool details, const std::unordered_map<std::string, std::string>& sessionConf) override {
     throw GlutenException("Not yet implemented");
   }
+  void injectWriteFilesTempPath(const std::string& path) override {
+    throw GlutenException("Not yet implemented");
+  }
+
+  void dumpConf(const std::string& path) override {
+    throw GlutenException("Not yet implemented");
+  }
 
  private:
   ResourceMap<std::shared_ptr<ResultIterator>> resultIteratorHolder_;
@@ -101,10 +111,7 @@ class DummyRuntime final : public Runtime {
       }
       hasNext_ = false;
 
-      auto fArrInt32 = arrow::field("f_int32", arrow::int32());
-      auto rbSchema = arrow::schema({fArrInt32});
-      auto rb = arrow::RecordBatch::Make(rbSchema, 1, std::vector<std::shared_ptr<arrow::Array>>{});
-      return std::make_shared<ArrowColumnarBatch>(rb);
+      return gluten::createZeroColumnBatch(1);
     }
 
    private:

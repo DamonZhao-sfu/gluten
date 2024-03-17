@@ -18,14 +18,31 @@ package io.glutenproject.execution
 
 import io.glutenproject.substrait.plan.PlanBuilder
 
+case class MergeTreePartSplit(
+    name: String,
+    dirName: String,
+    targetNode: String,
+    start: Long,
+    length: Long,
+    bytesOnDisk: Long) {
+  override def toString: String = {
+    s"part name: $name, range: $start-${start + length}"
+  }
+}
+
 case class GlutenMergeTreePartition(
     index: Int,
     engine: String,
     database: String,
     table: String,
-    tablePath: String,
-    minParts: Long,
-    maxParts: Long,
+    relativeTablePath: String,
+    absoluteTablePath: String,
+    orderByKey: String,
+    lowCardKey: String,
+    primaryKey: String,
+    partList: Array[MergeTreePartSplit],
+    tableSchemaJson: String,
+    clickhouseTableConfigs: Map[String, String],
     plan: Array[Byte] = PlanBuilder.EMPTY_PLAN)
   extends BaseGlutenPartition {
   override def preferredLocations(): Array[String] = {

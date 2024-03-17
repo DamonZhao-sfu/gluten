@@ -32,7 +32,7 @@ abstract class MixedAffinity(manager: AffinityManager) extends Affinity(manager)
 
   def getNativeMergeTreePartitionLocations(
       filePartition: GlutenMergeTreePartition): Array[String] = {
-    getHostLocations(filePartition.tablePath + "_" + filePartition.maxParts)
+    getHostLocations(filePartition.relativeTablePath + "/" + filePartition.partList(0).name)
   }
 
   def getHostLocations(filePath: String): Array[String] = {

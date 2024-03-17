@@ -28,18 +28,19 @@ import io.glutenproject.substrait.plan.{PlanBuilder, PlanNode}
 import io.glutenproject.substrait.rel.{RelNode, SplitInfo}
 import io.glutenproject.utils.SubstraitPlanPrinterUtil
 
-import org.apache.spark.{Dependency, OneToOneDependency, Partition, SparkConf, TaskContext}
+import org.apache.spark._
 import org.apache.spark.rdd.RDD
+import org.apache.spark.softaffinity.SoftAffinity
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, SortOrder}
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution._
+import org.apache.spark.sql.execution.datasources.FilePartition
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 import com.google.common.collect.Lists
 
-import scala.collection.JavaConverters._
 import scala.collection.mutable
 
 case class TransformContext(
@@ -95,8 +96,13 @@ trait UnaryTransformSupport extends TransformSupport with UnaryExecNode {
 
 case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = false)(
     val transformStageId: Int
-) extends UnaryTransformSupport {
+) extends GenerateTreeStringShim
+  with UnaryTransformSupport {
   assert(child.isInstanceOf[TransformSupport])
+
+  def stageId: Int = transformStageId
+
+  def wholeStageTransformerContextDefined: Boolean = wholeStageTransformerContext.isDefined
 
   // For WholeStageCodegen-like operator, only pipeline time will be handled in graph plotting.
   // See SparkPlanGraph.scala:205 for reference.
@@ -133,9 +139,6 @@ case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = f
 
   def substraitPlan: PlanNode = {
     if (wholeStageTransformerContext.isDefined) {
-      // TODO: remove this work around after we make `RelNode#toProtobuf` idempotent
-      //    see `SubstraitContext#initSplitInfosIndex`.
-      wholeStageTransformerContext.get.substraitContext.initSplitInfosIndex(0)
       wholeStageTransformerContext.get.root
     } else {
       generateWholeStageTransformContext().root
@@ -159,34 +162,6 @@ case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = f
   override def outputOrdering: Seq[SortOrder] = child.outputOrdering
 
   override def otherCopyArgs: Seq[AnyRef] = Seq(transformStageId.asInstanceOf[Integer])
-
-  override def generateTreeString(
-      depth: Int,
-      lastChildren: Seq[Boolean],
-      append: String => Unit,
-      verbose: Boolean,
-      prefix: String = "",
-      addSuffix: Boolean = false,
-      maxFields: Int,
-      printNodeId: Boolean,
-      indent: Int = 0): Unit = {
-    val prefix = if (printNodeId) "^ " else s"^($transformStageId) "
-    child.generateTreeString(
-      depth,
-      lastChildren,
-      append,
-      verbose,
-      prefix,
-      addSuffix = false,
-      maxFields,
-      printNodeId = printNodeId,
-      indent)
-    if (verbose && wholeStageTransformerContext.isDefined) {
-      append(prefix + "Substrait plan:\n")
-      append(substraitPlanJson)
-      append("\n")
-    }
-  }
 
   // It's misleading with "Codegen" used. But we have to keep "WholeStageCodegen" prefixed to
   // make whole stage transformer clearly plotted in UI, like spark's whole stage codegen.
@@ -292,44 +267,50 @@ case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = f
        * care of SCAN there won't be any other RDD for SCAN. As a result, genFirstStageIterator
        * rather than genFinalStageIterator will be invoked
        */
-
       val allScanSplitInfos = getSplitInfosFromScanTransformer(basicScanExecTransformers)
-      val (wsCxt, substraitPlanPartitions) = GlutenTimeMetric.withMillisTime {
-        val wsCxt = doWholeStageTransform()
 
-        // generate each partition of all scan exec
-        val substraitPlanPartitions = allScanSplitInfos.zipWithIndex.map {
-          case (splitInfos, index) =>
-            wsCxt.substraitContext.initSplitInfosIndex(0)
-            wsCxt.substraitContext.setSplitInfos(splitInfos)
-            val substraitPlan = wsCxt.root.toProtobuf
-            GlutenPartition(
-              index,
-              substraitPlan.toByteArray,
-              splitInfos.flatMap(_.preferredLocations().asScala).toArray)
-        }
-        (wsCxt, substraitPlanPartitions)
+      val (wsCtx, inputPartitions) = GlutenTimeMetric.withMillisTime {
+        val wsCtx = doWholeStageTransform()
+        val partitions =
+          BackendsApiManager.getIteratorApiInstance.genPartitions(
+            wsCtx,
+            allScanSplitInfos,
+            basicScanExecTransformers)
+
+        (wsCtx, partitions)
       }(
         t =>
           logOnLevel(
             substraitPlanLogLevel,
             s"$nodeName generating the substrait plan took: $t ms."))
 
-      new GlutenWholeStageColumnarRDD(
+      val rdd = new GlutenWholeStageColumnarRDD(
         sparkContext,
-        substraitPlanPartitions,
+        inputPartitions,
         inputRDDs,
         pipelineTime,
         leafMetricsUpdater().updateInputMetrics,
         BackendsApiManager.getMetricsApiInstance.metricsUpdatingFunction(
           child,
-          wsCxt.substraitContext.registeredRelMap,
-          wsCxt.substraitContext.registeredJoinParams,
-          wsCxt.substraitContext.registeredAggregationParams
+          wsCtx.substraitContext.registeredRelMap,
+          wsCtx.substraitContext.registeredJoinParams,
+          wsCtx.substraitContext.registeredAggregationParams
         )
       )
+      val allScanPartitions = basicScanExecTransformers.map(_.getPartitions)
+      (0 until allScanPartitions.head.size).foreach(
+        i => {
+          val currentPartitions = allScanPartitions.map(_(i))
+          currentPartitions.indices.foreach(
+            i =>
+              currentPartitions(i) match {
+                case f: FilePartition =>
+                  SoftAffinity.updateFilePartitionLocations(f, rdd.id)
+                case _ =>
+              })
+        })
+      rdd
     } else {
-      val buildRelationBatchHolder: mutable.ListBuffer[ColumnarBatch] = mutable.ListBuffer()
 
       /**
        * the whole stage contains NO BasicScanExecTransformer. this the default case for:
@@ -349,7 +330,6 @@ case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = f
         sparkConf,
         resCtx,
         pipelineTime,
-        buildRelationBatchHolder,
         BackendsApiManager.getMetricsApiInstance.metricsUpdatingFunction(
           child,
           resCtx.substraitContext.registeredRelMap,
@@ -443,14 +423,18 @@ class ColumnarInputRDDsWrapper(columnarInputRDDs: Seq[RDD[ColumnarBatch]]) exten
       inputColumnarRDDPartitions: Seq[Partition],
       context: TaskContext): Seq[Iterator[ColumnarBatch]] = {
     var index = 0
-    columnarInputRDDs.map {
+    columnarInputRDDs.flatMap {
       case broadcast: BroadcastBuildSideRDD =>
-        BackendsApiManager.getIteratorApiInstance
-          .genBroadcastBuildSideIterator(broadcast.broadcasted, broadcast.broadCastContext)
+        broadcast.genBroadcastBuildSideIterator() :: Nil
+      case cartesian: CartesianColumnarBatchRDD =>
+        val partition =
+          inputColumnarRDDPartitions(index).asInstanceOf[CartesianColumnarBatchRDDPartition]
+        index += 1
+        cartesian.getIterators(partition, context)
       case rdd =>
         val it = rdd.iterator(inputColumnarRDDPartitions(index), context)
         index += 1
-        it
+        it :: Nil
     }
   }
 }

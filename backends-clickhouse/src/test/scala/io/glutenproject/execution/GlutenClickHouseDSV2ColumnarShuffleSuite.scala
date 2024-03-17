@@ -22,7 +22,7 @@ class GlutenClickHouseDSV2ColumnarShuffleSuite extends GlutenClickHouseTPCHAbstr
 
   override protected val tablesPath: String = basePath + "/tpch-data-ch"
   override protected val tpchQueries: String = rootPath + "queries/tpch-queries-ch"
-  override protected val queriesResults: String = rootPath + "queries-output"
+  override protected val queriesResults: String = rootPath + "mergetree-queries-output"
 
   /** Run Gluten + ClickHouse Backend with ColumnarShuffleManager */
   override protected def sparkConf: SparkConf = {
@@ -31,7 +31,6 @@ class GlutenClickHouseDSV2ColumnarShuffleSuite extends GlutenClickHouseTPCHAbstr
       .set("spark.io.compression.codec", "LZ4")
       .set("spark.sql.shuffle.partitions", "1")
       .set("spark.sql.autoBroadcastJoinThreshold", "-1")
-      .set("spark.gluten.sql.columnar.backend.ch.use.v2", "true")
   }
 
   test("TPCH Q1") {
@@ -43,7 +42,13 @@ class GlutenClickHouseDSV2ColumnarShuffleSuite extends GlutenClickHouseTPCHAbstr
   }
 
   test("TPCH Q3") {
-    runTPCHQuery(3) { df => }
+    runTPCHQuery(3) {
+      df =>
+        val aggs = df.queryExecution.executedPlan.collectWithSubqueries {
+          case agg: HashAggregateExecBaseTransformer => agg
+        }
+        assert(aggs.size == 1)
+    }
   }
 
   test("TPCH Q4") {
@@ -75,7 +80,13 @@ class GlutenClickHouseDSV2ColumnarShuffleSuite extends GlutenClickHouseTPCHAbstr
   }
 
   test("TPCH Q11") {
-    runTPCHQuery(11) { df => }
+    runTPCHQuery(11) {
+      df =>
+        val aggs = df.queryExecution.executedPlan.collectWithSubqueries {
+          case agg: HashAggregateExecBaseTransformer => agg
+        }
+        assert(aggs.size == 3)
+    }
   }
 
   test("TPCH Q12") {
@@ -83,15 +94,33 @@ class GlutenClickHouseDSV2ColumnarShuffleSuite extends GlutenClickHouseTPCHAbstr
   }
 
   test("TPCH Q13") {
-    runTPCHQuery(13) { df => }
+    runTPCHQuery(13) {
+      df =>
+        val aggs = df.queryExecution.executedPlan.collectWithSubqueries {
+          case agg: HashAggregateExecBaseTransformer => agg
+        }
+        assert(aggs.size == 3)
+    }
   }
 
   test("TPCH Q14") {
-    runTPCHQuery(14) { df => }
+    runTPCHQuery(14) {
+      df =>
+        val aggs = df.queryExecution.executedPlan.collectWithSubqueries {
+          case agg: HashAggregateExecBaseTransformer => agg
+        }
+        assert(aggs.size == 1)
+    }
   }
 
   test("TPCH Q15") {
-    runTPCHQuery(15) { df => }
+    runTPCHQuery(15) {
+      df =>
+        val aggs = df.queryExecution.executedPlan.collectWithSubqueries {
+          case agg: HashAggregateExecBaseTransformer => agg
+        }
+        assert(aggs.size == 4)
+    }
   }
 
   test("TPCH Q16") {
@@ -99,19 +128,43 @@ class GlutenClickHouseDSV2ColumnarShuffleSuite extends GlutenClickHouseTPCHAbstr
   }
 
   test("TPCH Q17") {
-    runTPCHQuery(17) { df => }
+    runTPCHQuery(17) {
+      df =>
+        val aggs = df.queryExecution.executedPlan.collectWithSubqueries {
+          case agg: HashAggregateExecBaseTransformer => agg
+        }
+        assert(aggs.size == 3)
+    }
   }
 
   test("TPCH Q18") {
-    runTPCHQuery(18) { df => }
+    runTPCHQuery(18) {
+      df =>
+        val aggs = df.queryExecution.executedPlan.collectWithSubqueries {
+          case agg: HashAggregateExecBaseTransformer => agg
+        }
+        assert(aggs.size == 4)
+    }
   }
 
   test("TPCH Q19") {
-    runTPCHQuery(19) { df => }
+    runTPCHQuery(19) {
+      df =>
+        val aggs = df.queryExecution.executedPlan.collectWithSubqueries {
+          case agg: HashAggregateExecBaseTransformer => agg
+        }
+        assert(aggs.size == 1)
+    }
   }
 
   test("TPCH Q20") {
-    runTPCHQuery(20) { df => }
+    runTPCHQuery(20) {
+      df =>
+        val aggs = df.queryExecution.executedPlan.collectWithSubqueries {
+          case agg: HashAggregateExecBaseTransformer => agg
+        }
+        assert(aggs.size == 1)
+    }
   }
 
   test("TPCH Q21") {

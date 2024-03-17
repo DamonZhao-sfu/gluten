@@ -16,6 +16,8 @@
  */
 package org.apache.spark.sql.extension
 
+import io.glutenproject.GlutenConfig
+
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.expressions._
@@ -45,8 +47,21 @@ class RewriteDateTimestampComparisonRule(session: SparkSession, conf: SQLConf)
     val SECOND, MINUTE, HOUR, DAY, MONTH, YEAR = Value
   }
 
+  val supportedDateTimeFormats = Set(
+    "yyyy-MM-dd HH:mm:ss",
+    "yyyy-MM-dd HH:mm",
+    "yyyy-MM-dd HH",
+    "yyyy-MM-dd",
+    "yyyy-MM",
+    "yyyy"
+  )
+
   override def apply(plan: LogicalPlan): LogicalPlan = {
-    if (plan.resolved) {
+    if (
+      plan.resolved &&
+      GlutenConfig.getConf.enableGluten &&
+      GlutenConfig.getConf.enableRewriteDateTimestampComparison
+    ) {
       visitPlan(plan)
     } else {
       plan
@@ -91,10 +106,7 @@ class RewriteDateTimestampComparisonRule(session: SparkSession, conf: SQLConf)
     ) {
       return false
     }
-    if (!allConstExpression(expression)) {
-      return false
-    }
-    true
+    allConstExpression(expression)
   }
 
   private def isDateFromUnixTimestamp(expr: Expression): Boolean =
@@ -103,10 +115,32 @@ class RewriteDateTimestampComparisonRule(session: SparkSession, conf: SQLConf)
         isDateFromUnixTimestamp(toDate.left)
       case fromUnixTime: FromUnixTime =>
         true
+      case cast: Cast =>
+        if (cast.child.dataType.isInstanceOf[DateType]) {
+          isDateFromUnixTimestamp(cast.child)
+        } else {
+          false
+        }
       case _ => false
     }
 
-  private def getDateTimeUnit(expr: Expression): Option[TimeUnit.Value] = {
+  private def getDateTimeUnitFromConstDateExpression(expr: Expression): Option[TimeUnit.Value] = {
+    if (expr.dataType.isInstanceOf[DateType]) {
+      Some(TimeUnit.DAY)
+    } else if (expr.isInstanceOf[Literal] && expr.dataType.isInstanceOf[StringType]) {
+      val dateStr = expr.asInstanceOf[Literal].value.asInstanceOf[UTF8String].toString
+      val fullFormat = "yyyy-MM-dd HH:mm:ss"
+      if (dateStr.length > fullFormat.length) {
+        None
+      } else {
+        getDateTimeUnitFromString(fullFormat.substring(0, dateStr.length()))
+      }
+    } else {
+      None
+    }
+  }
+
+  private def getDateTimeUnitFromUnixTimeExpression(expr: Expression): Option[TimeUnit.Value] = {
     expr match {
       case toDate: ParseToDate =>
         val timeUnit = if (toDate.format.isEmpty) {
@@ -114,7 +148,7 @@ class RewriteDateTimestampComparisonRule(session: SparkSession, conf: SQLConf)
         } else {
           getDateTimeUnitFromLiteral(toDate.format)
         }
-        val nestedTimeUnit = getDateTimeUnit(toDate.left)
+        val nestedTimeUnit = getDateTimeUnitFromUnixTimeExpression(toDate.left)
         if (nestedTimeUnit.isEmpty) {
           timeUnit
         } else {
@@ -124,9 +158,32 @@ class RewriteDateTimestampComparisonRule(session: SparkSession, conf: SQLConf)
             timeUnit
           }
         }
+      case cast: Cast =>
+        getDateTimeUnitFromUnixTimeExpression(cast.child)
       case fromUnixTime: FromUnixTime =>
         getDateTimeUnitFromLiteral(Some(fromUnixTime.format))
       case _ => None
+    }
+  }
+
+  private def getDateTimeUnitFromString(formatStr: String): Option[TimeUnit.Value] = {
+    if (!supportedDateTimeFormats.contains(formatStr)) {
+      return None
+    }
+    if (formatStr.contains("ss")) {
+      Some(TimeUnit.SECOND)
+    } else if (formatStr.contains("mm")) {
+      Some(TimeUnit.MINUTE)
+    } else if (formatStr.contains("HH")) {
+      Some(TimeUnit.HOUR)
+    } else if (formatStr.contains("dd")) {
+      Some(TimeUnit.DAY)
+    } else if (formatStr.contains("MM")) {
+      Some(TimeUnit.MONTH)
+    } else if (formatStr.contains("yyyy")) {
+      Some(TimeUnit.YEAR)
+    } else {
+      None
     }
   }
 
@@ -143,21 +200,7 @@ class RewriteDateTimestampComparisonRule(session: SparkSession, conf: SQLConf)
     } else {
       val formatExpr = expr.get.asInstanceOf[Literal]
       val formatStr = formatExpr.value.asInstanceOf[UTF8String].toString
-      if (formatStr.contains("ss")) {
-        Some(TimeUnit.SECOND)
-      } else if (formatStr.contains("mm")) {
-        Some(TimeUnit.MINUTE)
-      } else if (formatStr.contains("HH")) {
-        Some(TimeUnit.HOUR)
-      } else if (formatStr.contains("dd")) {
-        Some(TimeUnit.DAY)
-      } else if (formatStr.contains("MM")) {
-        Some(TimeUnit.MONTH)
-      } else if (formatStr.contains("yyyy")) {
-        Some(TimeUnit.YEAR)
-      } else {
-        None
-      }
+      getDateTimeUnitFromString(formatStr)
     }
   }
 
@@ -193,12 +236,15 @@ class RewriteDateTimestampComparisonRule(session: SparkSession, conf: SQLConf)
     Add(toUnixTimestampExpr, adjustExpr)
   }
 
+  // rewrite an expressiont that converts unix timestamp to date back to unix timestamp
   private def rewriteUnixTimestampToDate(expr: Expression): Expression = {
     expr match {
       case toDate: ParseToDate =>
         rewriteUnixTimestampToDate(toDate.left)
       case fromUnixTime: FromUnixTime =>
         fromUnixTime.sec
+      case cast: Cast =>
+        rewriteUnixTimestampToDate(cast.child)
       case _ => throw new IllegalArgumentException(s"Invalid expression: $expr")
     }
   }
@@ -248,79 +294,81 @@ class RewriteDateTimestampComparisonRule(session: SparkSession, conf: SQLConf)
     case TimeUnit.YEAR => 31536000
   }
 
+  private def checkDateTimeUnits(a: Option[TimeUnit.Value], b: Option[TimeUnit.Value]): Boolean = {
+    if (a.isEmpty || b.isEmpty) {
+      return false
+    }
+    return a.get == b.get
+  }
+
   private def rewriteGreaterThen(cmp: GreaterThan): Expression = {
-    val timeUnit = getDateTimeUnit(cmp.left)
-    if (timeUnit.isEmpty) {
+    val timeUnit = getDateTimeUnitFromUnixTimeExpression(cmp.left)
+    val adjustedTimeUnit = getDateTimeUnitFromConstDateExpression(cmp.right)
+    if (!checkDateTimeUnits(timeUnit, adjustedTimeUnit)) {
       return cmp
     }
     val zoneId = getTimeZoneId(cmp.left)
-    val adjustedOffset = TimeUnitToSeconds(timeUnit.get)
+    val adjustedOffset = TimeUnitToSeconds(adjustedTimeUnit.get)
     val newLeft = rewriteUnixTimestampToDate(cmp.left)
-    val newRight = rewriteConstDate(cmp.right, timeUnit.get, zoneId, adjustedOffset)
+    val newRight = rewriteConstDate(cmp.right, adjustedTimeUnit.get, zoneId, adjustedOffset)
     GreaterThanOrEqual(newLeft, newRight)
   }
 
   private def rewriteGreaterThanOrEqual(cmp: GreaterThanOrEqual): Expression = {
-    val timeUnit = getDateTimeUnit(cmp.left)
-    if (timeUnit.isEmpty) {
+    val timeUnit = getDateTimeUnitFromUnixTimeExpression(cmp.left)
+    val adjustedTimeUnit = getDateTimeUnitFromConstDateExpression(cmp.right)
+    if (!checkDateTimeUnits(timeUnit, adjustedTimeUnit)) {
       return cmp
     }
     val zoneId = getTimeZoneId(cmp.left)
     val adjustedOffset = 0
     val newLeft = rewriteUnixTimestampToDate(cmp.left)
-    val newRight = rewriteConstDate(cmp.right, timeUnit.get, zoneId, adjustedOffset)
+    val newRight = rewriteConstDate(cmp.right, adjustedTimeUnit.get, zoneId, adjustedOffset)
     GreaterThanOrEqual(newLeft, newRight)
   }
 
   private def rewriteLessThen(cmp: LessThan): Expression = {
-    val timeUnit = getDateTimeUnit(cmp.left)
-    if (timeUnit.isEmpty) {
+    val timeUnit = getDateTimeUnitFromUnixTimeExpression(cmp.left)
+    val adjustedTimeUnit = getDateTimeUnitFromConstDateExpression(cmp.right)
+    if (!checkDateTimeUnits(timeUnit, adjustedTimeUnit)) {
       return cmp
     }
     val zoneId = getTimeZoneId(cmp.left)
     val adjustedOffset = 0
     val newLeft = rewriteUnixTimestampToDate(cmp.left)
-    val newRight = rewriteConstDate(cmp.right, timeUnit.get, zoneId, adjustedOffset)
+    val newRight = rewriteConstDate(cmp.right, adjustedTimeUnit.get, zoneId, adjustedOffset)
     LessThan(newLeft, newRight)
   }
 
   private def rewriteLessThenOrEqual(cmp: LessThanOrEqual): Expression = {
-    val timeUnit = getDateTimeUnit(cmp.left)
-    if (timeUnit.isEmpty) {
+    val timeUnit = getDateTimeUnitFromUnixTimeExpression(cmp.left)
+    val adjustedTimeUnit = getDateTimeUnitFromConstDateExpression(cmp.right)
+    if (!checkDateTimeUnits(timeUnit, adjustedTimeUnit)) {
       return cmp
     }
     val zoneId = getTimeZoneId(cmp.left)
-    val adjustedOffset = TimeUnitToSeconds(timeUnit.get)
+    val adjustedOffset = TimeUnitToSeconds(adjustedTimeUnit.get)
     val newLeft = rewriteUnixTimestampToDate(cmp.left)
-    val newRight = rewriteConstDate(cmp.right, timeUnit.get, zoneId, adjustedOffset)
+    val newRight = rewriteConstDate(cmp.right, adjustedTimeUnit.get, zoneId, adjustedOffset)
     LessThan(newLeft, newRight)
   }
 
   private def rewriteEqualTo(cmp: EqualTo): Expression = {
-    val timeUnit = getDateTimeUnit(cmp.left)
-    if (timeUnit.isEmpty) {
+    val timeUnit = getDateTimeUnitFromUnixTimeExpression(cmp.left)
+    val adjustedTimeUnit = getDateTimeUnitFromConstDateExpression(cmp.right)
+    if (!checkDateTimeUnits(timeUnit, adjustedTimeUnit)) {
       return cmp
     }
     val zoneId = getTimeZoneId(cmp.left)
-    val timestampLeft = rewriteUnixTimestampToDate(cmp.left)
-    val adjustedOffset = Literal(TimeUnitToSeconds(timeUnit.get), timestampLeft.dataType)
-    val addjustedOffsetExpr = Remainder(timestampLeft, adjustedOffset)
-    val newLeft = Subtract(timestampLeft, addjustedOffsetExpr)
-    val newRight = rewriteConstDate(cmp.right, timeUnit.get, zoneId, 0)
-    EqualTo(newLeft, newRight)
+    val newLeft = rewriteUnixTimestampToDate(cmp.left)
+    val adjustedOffset = Literal(TimeUnitToSeconds(adjustedTimeUnit.get), newLeft.dataType)
+    val newRight = rewriteConstDate(cmp.right, adjustedTimeUnit.get, zoneId, 0)
+    val leftBound = GreaterThanOrEqual(newLeft, newRight)
+    val rigtBound = LessThan(newLeft, Add(newRight, adjustedOffset))
+    And(leftBound, rigtBound)
   }
 
   private def rewriteEqualNullSafe(cmp: EqualNullSafe): Expression = {
-    val timeUnit = getDateTimeUnit(cmp.left)
-    if (timeUnit.isEmpty) {
-      return cmp
-    }
-    val zoneId = getTimeZoneId(cmp.left)
-    val timestampLeft = rewriteUnixTimestampToDate(cmp.left)
-    val adjustedOffset = Literal(TimeUnitToSeconds(timeUnit.get), timestampLeft.dataType)
-    val addjustedOffsetExpr = Remainder(timestampLeft, adjustedOffset)
-    val newLeft = Subtract(timestampLeft, addjustedOffsetExpr)
-    val newRight = rewriteConstDate(cmp.right, timeUnit.get, zoneId, 0)
-    EqualNullSafe(newLeft, newRight)
+    cmp
   }
 }

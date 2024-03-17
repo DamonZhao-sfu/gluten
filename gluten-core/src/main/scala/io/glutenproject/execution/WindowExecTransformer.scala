@@ -100,11 +100,8 @@ case class WindowExecTransformer(
     BackendsApiManager.getTransformerApiInstance.packPBMessage(message)
   }
 
-  def getRelNode(
+  def getWindowRel(
       context: SubstraitContext,
-      windowExpression: Seq[NamedExpression],
-      partitionSpec: Seq[Expression],
-      sortOrder: Seq[SortOrder],
       originalInputAttributes: Seq[Attribute],
       operatorId: Long,
       input: RelNode,
@@ -129,31 +126,18 @@ case class WindowExecTransformer(
 
     // Sort By Expressions
     val sortFieldList =
-      sortOrder.map {
+      orderSpec.map {
         order =>
           val builder = SortField.newBuilder()
           val exprNode = ExpressionConverter
             .replaceWithExpressionTransformer(order.child, attributeSeq = child.output)
             .doTransform(args)
           builder.setExpr(exprNode.toProtobuf)
-
-          (order.direction.sql, order.nullOrdering.sql) match {
-            case ("ASC", "NULLS FIRST") =>
-              builder.setDirectionValue(1);
-            case ("ASC", "NULLS LAST") =>
-              builder.setDirectionValue(2);
-            case ("DESC", "NULLS FIRST") =>
-              builder.setDirectionValue(3);
-            case ("DESC", "NULLS LAST") =>
-              builder.setDirectionValue(4);
-            case _ =>
-              builder.setDirectionValue(0);
-          }
+          builder.setDirectionValue(SortExecTransformer.transformSortDirection(order))
           builder.build()
       }.asJava
     if (!validation) {
-      val extensionNode =
-        ExtensionBuilder.makeAdvancedExtension(genWindowParameters(), null)
+      val extensionNode = ExtensionBuilder.makeAdvancedExtension(genWindowParameters(), null)
       RelBuilder.makeWindowRel(
         input,
         windowExpressions,
@@ -190,15 +174,7 @@ case class WindowExecTransformer(
     val substraitContext = new SubstraitContext
     val operatorId = substraitContext.nextOperatorId(this.nodeName)
 
-    val relNode = getRelNode(
-      substraitContext,
-      windowExpression,
-      partitionSpec,
-      orderSpec,
-      child.output,
-      operatorId,
-      null,
-      validation = true)
+    val relNode = getWindowRel(substraitContext, child.output, operatorId, null, validation = true)
 
     doNativeValidation(substraitContext, relNode)
   }
@@ -212,15 +188,8 @@ case class WindowExecTransformer(
       return childCtx
     }
 
-    val currRel = getRelNode(
-      context,
-      windowExpression,
-      partitionSpec,
-      orderSpec,
-      child.output,
-      operatorId,
-      childCtx.root,
-      validation = false)
+    val currRel =
+      getWindowRel(context, child.output, operatorId, childCtx.root, validation = false)
     assert(currRel != null, "Window Rel should be valid")
     TransformContext(childCtx.outputAttributes, output, currRel)
   }

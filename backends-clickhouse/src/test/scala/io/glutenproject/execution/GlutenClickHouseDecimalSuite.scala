@@ -35,23 +35,24 @@ class GlutenClickHouseDecimalSuite
   extends GlutenClickHouseTPCHAbstractSuite
   with AdaptiveSparkPlanHelper {
 
-  override protected val resourcePath: String =
-    "../../../../gluten-core/src/test/resources/tpch-data"
+  override protected val needCopyParquetToTablePath = true
 
   override protected val tablesPath: String = basePath + "/tpch-data"
   override protected val tpchQueries: String =
     rootPath + "../../../../gluten-core/src/test/resources/tpch-queries"
   override protected val queriesResults: String = rootPath + "queries-output"
-
+  override protected val createNullableTables = true
   override protected def createTPCHNotNullTables(): Unit = {}
 
+  override protected def createTPCHNullableTables(): Unit = {
+    decimalTPCHTables.foreach(t => createDecimalTables(t._1))
+  }
   override protected def sparkConf: SparkConf = {
     super.sparkConf
       .set("spark.shuffle.manager", "sort")
       .set("spark.io.compression.codec", "snappy")
       .set("spark.sql.shuffle.partitions", "5")
       .set("spark.sql.autoBroadcastJoinThreshold", "10MB")
-      .set("spark.gluten.sql.columnar.backend.ch.use.v2", "false")
       .set("spark.sql.decimalOperations.allowPrecisionLoss", "false")
   }
 
@@ -70,12 +71,6 @@ class GlutenClickHouseDecimalSuite
     // 1: ch decimal avg is float, 3/10: all value is null and compare with limit
     (DecimalType.apply(38, 19), Seq(1, 3, 10))
   )
-
-  override protected val createNullableTables = true
-
-  override protected def createTPCHNullableTables(): Unit = {
-    decimalTPCHTables.foreach(t => createDecimalTables(t._1))
-  }
 
   private def createDecimalTables(dataType: DecimalType): Unit = {
     spark.sql(s"DROP database IF EXISTS decimal_${dataType.precision}_${dataType.scale}")

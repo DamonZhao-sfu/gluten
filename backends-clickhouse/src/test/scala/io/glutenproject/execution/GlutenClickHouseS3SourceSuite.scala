@@ -23,8 +23,7 @@ import org.apache.spark.SparkConf
 
 class GlutenClickHouseS3SourceSuite extends GlutenClickHouseTPCHAbstractSuite {
 
-  override protected val resourcePath: String =
-    "../../../../gluten-core/src/test/resources/tpch-data"
+  override protected val needCopyParquetToTablePath = true
 
   override protected val tablesPath: String = basePath + "/tpch-data"
   override protected val tpchQueries: String =
@@ -37,7 +36,6 @@ class GlutenClickHouseS3SourceSuite extends GlutenClickHouseTPCHAbstractSuite {
       .set("spark.io.compression.codec", "LZ4")
       .set("spark.sql.shuffle.partitions", "5")
       .set("spark.sql.autoBroadcastJoinThreshold", "10MB")
-      .set("spark.gluten.sql.columnar.backend.ch.use.v2", "false")
       .set("spark.memory.offHeap.size", "4g")
       // test with minio
       .set("spark.hadoop.fs.s3a.access.key", "admin")

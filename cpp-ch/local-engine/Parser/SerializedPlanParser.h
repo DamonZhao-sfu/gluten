@@ -76,7 +76,6 @@ static const std::map<std::string, std::string> SCALAR_FUNCTIONS
        {"pmod", "pmod"},
        {"abs", "abs"},
        {"ceil", "ceil"},
-       {"floor", "floor"},
        {"round", "roundHalfUp"},
        {"bround", "roundBankers"},
        {"exp", "exp"},
@@ -148,19 +147,14 @@ static const std::map<std::string, std::string> SCALAR_FUNCTIONS
        {"lpad", "leftPadUTF8"},
        {"rpad", "rightPadUTF8"},
        {"reverse", ""}, /// dummy mapping
-       {"md5", "MD5"},
        {"translate", "translateUTF8"},
        {"repeat", "repeat"},
-       {"position", "positionUTF8Spark"},
-       {"locate", "positionUTF8Spark"},
        {"space", "space"},
        {"initcap", "initcapUTF8"},
        {"conv", "sparkConv"},
        {"uuid", "generateUUIDv4"},
 
        /// hash functions
-       {"sha1", "SHA1"},
-       {"sha2", ""}, /// dummy mapping
        {"crc32", "CRC32"},
        {"murmur3hash", "sparkMurmurHash3_32"},
        {"xxhash64", "sparkXxHash64"},
@@ -180,11 +174,11 @@ static const std::map<std::string, std::string> SCALAR_FUNCTIONS
        {"add_months", "addMonths"},
        {"date_trunc", "dateTrunc"},
        {"floor_datetime", "dateTrunc"},
+       {"floor", "sparkFloor"},
        {"months_between", "sparkMonthsBetween"},
 
        // array functions
        {"array", "array"},
-       {"size", "length"},
        {"range", "range"}, /// dummy mapping
 
        // map functions
@@ -195,7 +189,8 @@ static const std::map<std::string, std::string> SCALAR_FUNCTIONS
        {"map_from_arrays", "mapFromArrays"},
 
        // tuple functions
-       {"get_struct_field", "tupleElement"},
+       {"get_struct_field", "sparkTupleElement"},
+       {"get_array_struct_fields", "sparkTupleElement"},
        {"named_struct", "tuple"},
 
        // table-valued generator function
@@ -220,7 +215,7 @@ static const std::set<std::string> FUNCTION_NEED_KEEP_ARGUMENTS = {"alias"};
 struct QueryContext
 {
     StorageSnapshotPtr storage_snapshot;
-    std::shared_ptr<DB::StorageInMemoryMetadata> metadata;
+    std::shared_ptr<const DB::StorageInMemoryMetadata> metadata;
     std::shared_ptr<CustomStorageMergeTree> custom_storage_merge_tree;
 };
 
@@ -277,16 +272,30 @@ public:
 
     DB::QueryPlanStepPtr parseReadRealWithLocalFile(const substrait::ReadRel & rel);
     DB::QueryPlanStepPtr parseReadRealWithJavaIter(const substrait::ReadRel & rel);
-    // mergetree need create two steps in parse, can't return single step
-    DB::QueryPlanPtr parseMergeTreeTable(const substrait::ReadRel & rel, std::vector<IQueryPlanStep *> & steps);
     PrewhereInfoPtr parsePreWhereInfo(const substrait::Expression & rel, Block & input);
 
     static bool isReadRelFromJava(const substrait::ReadRel & rel);
+    static bool isReadFromMergeTree(const substrait::ReadRel & rel);
+
+    static substrait::ReadRel::LocalFiles parseLocalFiles(const std::string & split_info);
+    static substrait::ReadRel::ExtensionTable parseExtensionTable(const std::string & split_info);
 
     void addInputIter(jobject iter, bool materialize_input)
     {
         input_iters.emplace_back(iter);
         materialize_inputs.emplace_back(materialize_input);
+    }
+
+    void addSplitInfo(std::string & split_info)
+    {
+        split_infos.emplace_back(std::move(split_info));
+    }
+
+    int nextSplitInfoIndex()
+    {
+        if (split_info_index >= split_infos.size())
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "split info index out of range, split_info_index: {}, split_infos.size(): {}", split_info_index, split_infos.size());
+        return split_info_index++;
     }
 
     void parseExtensions(const ::google::protobuf::RepeatedPtrField<substrait::extensions::SimpleExtensionDeclaration> & extensions);
@@ -314,6 +323,12 @@ private:
     collectJoinKeys(const substrait::Expression & condition, std::vector<std::pair<int32_t, int32_t>> & join_keys, int32_t right_key_start);
 
     DB::ActionsDAGPtr parseFunction(
+        const Block & header,
+        const substrait::Expression & rel,
+        std::string & result_name,
+        DB::ActionsDAGPtr actions_dag = nullptr,
+        bool keep_result = false);
+    DB::ActionsDAGPtr parseFunctionOrExpression(
         const Block & header,
         const substrait::Expression & rel,
         std::string & result_name,
@@ -353,6 +368,16 @@ private:
         const substrait::FunctionArgument & arg);
     const DB::ActionsDAG::Node *
     parseFunctionArgument(DB::ActionsDAGPtr & actions_dag, const std::string & function_name, const substrait::FunctionArgument & arg);
+
+    void parseArrayJoinArguments(
+        DB::ActionsDAGPtr & actions_dag,
+        const std::string & function_name,
+        const substrait::Expression_ScalarFunction & scalar_function,
+        bool position,
+        ActionsDAG::NodeRawConstPtrs & parsed_args,
+        bool & is_map);
+
+
     const DB::ActionsDAG::Node * parseExpression(DB::ActionsDAGPtr actions_dag, const substrait::Expression & rel);
     const ActionsDAG::Node *
     toFunctionNode(ActionsDAGPtr actions_dag, const String & function, const DB::ActionsDAG::NodeRawConstPtrs & args);
@@ -368,6 +393,8 @@ private:
     int name_no = 0;
     std::unordered_map<std::string, std::string> function_mapping;
     std::vector<jobject> input_iters;
+    std::vector<std::string> split_infos;
+    int split_info_index = 0;
     std::vector<bool> materialize_inputs;
     ContextPtr context;
     // for parse rel node, collect steps from a rel node
@@ -411,16 +438,21 @@ private:
     DB::QueryPlanPtr current_query_plan;
     RelMetricPtr metric;
     std::vector<QueryPlanPtr> extra_plan_holder;
+
+    /// Dump processor runtime information to log
+    std::string dumpPipeline();
 };
 
 
 class ASTParser
 {
 public:
-    explicit ASTParser(const ContextPtr & _context, std::unordered_map<std::string, std::string> & _function_mapping)
-        : context(_context), function_mapping(_function_mapping)
+    explicit ASTParser(
+        const ContextPtr & context_, std::unordered_map<std::string, std::string> & function_mapping_, SerializedPlanParser * plan_parser_)
+        : context(context_), function_mapping(function_mapping_), plan_parser(plan_parser_)
     {
     }
+
     ~ASTParser() = default;
 
     ASTPtr parseToAST(const Names & names, const substrait::Expression & rel);
@@ -429,6 +461,7 @@ public:
 private:
     ContextPtr context;
     std::unordered_map<std::string, std::string> function_mapping;
+    SerializedPlanParser * plan_parser;
 
     void parseFunctionArgumentsToAST(const Names & names, const substrait::Expression_ScalarFunction & scalar_function, ASTs & ast_args);
     ASTPtr parseArgumentToAST(const Names & names, const substrait::Expression & rel);

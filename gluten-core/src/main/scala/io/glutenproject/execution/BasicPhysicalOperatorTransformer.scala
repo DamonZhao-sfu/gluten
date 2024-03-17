@@ -29,7 +29,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.execution._
-import org.apache.spark.sql.execution.datasources.v2.{BatchScanExec, DataSourceV2ScanExecBase, FileScan}
+import org.apache.spark.sql.execution.datasources.v2.{BatchScanExec, FileScan}
 import org.apache.spark.sql.utils.StructTypeFWD
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -70,10 +70,8 @@ abstract class FilterExecTransformerBase(val cond: Expression, val input: SparkP
       operatorId: Long,
       input: RelNode,
       validation: Boolean): RelNode = {
+    assert(condExpr != null)
     val args = context.registeredFunction
-    if (condExpr == null) {
-      return input
-    }
     val condExprNode = ExpressionConverter
       .replaceWithExpressionTransformer(condExpr, attributeSeq = originalInputAttributes)
       .doTransform(args)
@@ -107,42 +105,47 @@ abstract class FilterExecTransformerBase(val cond: Expression, val input: SparkP
 
   override protected def outputExpressions: Seq[NamedExpression] = child.output
 
+  protected def getRemainingCondition: Expression
+
   override protected def doValidateInternal(): ValidationResult = {
-    if (cond == null) {
-      // The computing of this Filter is not needed.
+    val remainingCondition = getRemainingCondition
+    if (remainingCondition == null) {
+      // All the filters can be pushed down and the computing of this Filter
+      // is not needed.
       return ValidationResult.ok
     }
     val substraitContext = new SubstraitContext
     val operatorId = substraitContext.nextOperatorId(this.nodeName)
     // Firstly, need to check if the Substrait plan for this operator can be successfully generated.
-    val relNode =
-      getRelNode(substraitContext, cond, child.output, operatorId, null, validation = true)
-    // For now backends only support scan + filter pattern
-    if (BackendsApiManager.getSettings.fallbackFilterWithoutConjunctiveScan()) {
-      if (
-        !(child.isInstanceOf[DataSourceScanExec] ||
-          child.isInstanceOf[DataSourceV2ScanExecBase])
-      ) {
-        return ValidationResult
-          .notOk("Filter operator's child is not DataSourceScanExec or DataSourceV2ScanExecBase")
-      }
-    }
-
+    val relNode = getRelNode(
+      substraitContext,
+      remainingCondition,
+      child.output,
+      operatorId,
+      null,
+      validation = true)
     // Then, validate the generated plan in native engine.
     doNativeValidation(substraitContext, relNode)
   }
 
   override def doTransform(context: SubstraitContext): TransformContext = {
     val childCtx = child.asInstanceOf[TransformSupport].doTransform(context)
+    val remainingCondition = getRemainingCondition
     val operatorId = context.nextOperatorId(this.nodeName)
-    if (cond == null && childCtx != null) {
+    if (remainingCondition == null) {
       // The computing for this filter is not needed.
       context.registerEmptyRelToOperator(operatorId)
-      return childCtx
+      // Since some columns' nullability will be removed after this filter, we need to update the
+      // outputAttributes of child context.
+      return TransformContext(childCtx.inputAttributes, output, childCtx.root)
     }
-
-    val currRel =
-      getRelNode(context, cond, child.output, operatorId, childCtx.root, validation = false)
+    val currRel = getRelNode(
+      context,
+      remainingCondition,
+      child.output,
+      operatorId,
+      childCtx.root,
+      validation = false)
     assert(currRel != null, "Filter rel should be valid.")
     TransformContext(childCtx.outputAttributes, output, currRel)
   }
@@ -232,6 +235,14 @@ case class ProjectExecTransformer private (projectList: Seq[NamedExpression], ch
     }
   }
 
+  override def verboseStringWithOperatorId(): String = {
+    s"""
+       |$formattedNodeName
+       |${ExplainUtils.generateFieldString("Output", projectList)}
+       |${ExplainUtils.generateFieldString("Input", child.output)}
+       |""".stripMargin
+  }
+
   override protected def withNewChildInternal(newChild: SparkPlan): ProjectExecTransformer =
     copy(child = newChild)
 }
@@ -280,7 +291,7 @@ object ProjectExecTransformer {
 }
 
 // An alternatives for UnionExec.
-case class UnionExecTransformer(children: Seq[SparkPlan]) extends SparkPlan with GlutenPlan {
+case class ColumnarUnionExec(children: Seq[SparkPlan]) extends SparkPlan with GlutenPlan {
   children.foreach(
     child =>
       child match {
@@ -308,7 +319,7 @@ case class UnionExecTransformer(children: Seq[SparkPlan]) extends SparkPlan with
   }
 
   override protected def withNewChildrenInternal(
-      newChildren: IndexedSeq[SparkPlan]): UnionExecTransformer =
+      newChildren: IndexedSeq[SparkPlan]): ColumnarUnionExec =
     copy(children = newChildren)
 
   def columnarInputRDD: RDD[ColumnarBatch] = {
@@ -329,10 +340,12 @@ case class UnionExecTransformer(children: Seq[SparkPlan]) extends SparkPlan with
   override protected def doExecuteColumnar(): RDD[ColumnarBatch] = columnarInputRDD
 
   override protected def doValidateInternal(): ValidationResult = {
-    if (!BackendsApiManager.getValidatorApiInstance.doSchemaValidate(schema)) {
-      return ValidationResult.notOk(s"Found schema check failure for $schema in $nodeName")
-    }
-    ValidationResult.ok
+    BackendsApiManager.getValidatorApiInstance
+      .doSchemaValidate(schema)
+      .map {
+        reason => ValidationResult.notOk(s"Found schema check failure for $schema, due to: $reason")
+      }
+      .getOrElse(ValidationResult.ok)
   }
 }
 
@@ -340,7 +353,7 @@ case class UnionExecTransformer(children: Seq[SparkPlan]) extends SparkPlan with
  * Contains functions for the comparision and separation of the filter conditions in Scan and
  * Filter. Contains the function to manually push down the conditions into Scan.
  */
-object FilterHandler {
+object FilterHandler extends PredicateHelper {
 
   /**
    * Get the original filter conditions in Scan for the comparison with those in Filter.
@@ -369,28 +382,6 @@ object FilterHandler {
   }
 
   /**
-   * Flatten the condition connected with 'And'. Return the filter conditions with sequence.
-   *
-   * @param condition
-   *   : the condition connected with 'And'
-   * @return
-   *   flattened conditions in sequence
-   */
-  def flattenCondition(condition: Expression): Seq[Expression] = {
-    var expressions: Seq[Expression] = Seq()
-    condition match {
-      case and: And =>
-        and.children.foreach(
-          expression => {
-            expressions ++= flattenCondition(expression)
-          })
-      case _ =>
-        expressions = expressions :+ condition
-    }
-    expressions
-  }
-
-  /**
    * Compare the semantics of the filter conditions pushed down to Scan and in the Filter.
    *
    * @param scanFilters
@@ -400,27 +391,29 @@ object FilterHandler {
    * @return
    *   the filter conditions not pushed down into Scan.
    */
-  def getLeftFilters(scanFilters: Seq[Expression], filters: Seq[Expression]): Seq[Expression] = {
-    var leftFilters: Seq[Expression] = Seq()
-    for (expression <- filters) {
-      if (!scanFilters.exists(_.semanticEquals(expression))) {
-        leftFilters = leftFilters :+ expression.clone()
-      }
-    }
-    leftFilters
-  }
+  def getRemainingFilters(scanFilters: Seq[Expression], filters: Seq[Expression]): Seq[Expression] =
+    (ExpressionSet(filters) -- ExpressionSet(scanFilters)).toSeq
 
   // Separate and compare the filter conditions in Scan and Filter.
-  // Push down the left conditions in Filter into Scan.
-  def applyFilterPushdownToScan(filter: FilterExec, reuseSubquery: Boolean): GlutenPlan =
+  // Try to push down the remaining conditions in Filter into Scan.
+  def applyFilterPushdownToScan(filter: FilterExec): SparkPlan =
     filter.child match {
       case fileSourceScan: FileSourceScanExec =>
-        val leftFilters =
-          getLeftFilters(fileSourceScan.dataFilters, flattenCondition(filter.condition))
+        val pushDownFilters =
+          BackendsApiManager.getSparkPlanExecApiInstance.postProcessPushDownFilter(
+            splitConjunctivePredicates(filter.condition),
+            fileSourceScan)
         ScanTransformerFactory.createFileSourceScanTransformer(
           fileSourceScan,
-          reuseSubquery,
-          extraFilters = leftFilters)
+          allPushDownFilters = Some(pushDownFilters))
+      case batchScan: BatchScanExec =>
+        val pushDownFilters =
+          BackendsApiManager.getSparkPlanExecApiInstance.postProcessPushDownFilter(
+            splitConjunctivePredicates(filter.condition),
+            batchScan)
+        ScanTransformerFactory.createBatchScanTransformer(
+          batchScan,
+          allPushDownFilters = Some(pushDownFilters))
       case other =>
         throw new UnsupportedOperationException(s"${other.getClass.toString} is not supported.")
     }

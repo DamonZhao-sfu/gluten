@@ -4,6 +4,19 @@ title: Gluten with Velox Backend
 nav_order: 1
 parent: Getting-Started
 ---
+# Supported Version
+| Type  | Version                      |
+|-------|------------------------------|
+| Spark | 3.2.2, 3.3.1                 |
+| OS    | Ubuntu20.04/22.04, Centos7/8 |
+| jdk   | openjdk8                     |
+| scala | 2.12
+
+Spark3.4.0 support is still WIP. TPCH/DS can pass, UT is not yet passed.
+
+There are pending PRs for jdk11 support.
+
+
 Currently, the mvn script can automatically fetch and build all dependency libraries incluing Velox. Our nightly build still use Velox under oap-project. 
 
 # Prerequisite
@@ -37,13 +50,13 @@ export PATH=$JAVA_HOME/bin:$PATH
 ## config maven, like proxy in ~/.m2/settings.xml
 
 ## fetch gluten code
-git clone https://github.com/oap-project/gluten.git
+git clone https://github.com/apache/incubator-gluten.git
 ```
 
 # Build Gluten with Velox Backend
 
-It's recommended to use buildbundle-veloxbe.sh and build gluten in one script.
-[Gluten Usage](./GlutenUsage.md) listed the parameters and their default value of build command for your reference.
+It's recommended to use buildbundle-veloxbe.sh to build gluten in one script.
+[Gluten build guide](./build-guide.md) listed the parameters and their default value of build command for your reference.
 
 **For x86_64 build**
 
@@ -56,6 +69,7 @@ cd /path/to/gluten
 ## After a complete build, if you need to re-build the project and only some gluten code is changed,
 ## you can use the following command to skip building velox and protobuf.
 # ./dev/buildbundle-veloxbe.sh --enable_ep_cache=ON --build_protobuf=OFF
+## If you have the same error with issue-3283, you need to add the parameter `--compile_arrow_java=ON`
 ```
 
 **For aarch64 build:**
@@ -101,9 +115,9 @@ Once building successfully, the Jar file will be generated in the directory: pac
 
 ## Dependency library deployment
 
-With config `enable_vcpkg=ON`, the dependency libraries will be built and staticly linked into libvelox.so and libgluten.so, which is packed into the gluten-jar. In this way, only the gluten-jar is needed to add to `spark.<driver|executor>.extraClassPath` and spark will deploy the jar to each worker node. It's better to build the static version using a clean docker image without any extra libraries installed. On host with some libraries like jemalloc installed, the script may crash with odd message. You may need to uninstall those libraries to get a clean host.
+With config `enable_vcpkg=ON`, the dependency libraries will be built and statically linked into libvelox.so and libgluten.so, which is packed into the gluten-jar. In this way, only the gluten-jar is needed to add to `spark.<driver|executor>.extraClassPath` and spark will deploy the jar to each worker node. It's better to build the static version using a clean docker image without any extra libraries installed. On host with some libraries like jemalloc installed, the script may crash with odd message. You may need to uninstall those libraries to get a clean host.
 
-With config `enable_vcpkg=OFF`, the dependency libraries won't be staticly linked, instead the script will install the libraries to system then pack the dependency libraries into another jar named gluten-package-<version>-SNAPSHOT.jar. Then you need to add the jar to extraClassPath then set `spark.gluten.loadLibFromJar=true`. Or you already manually deployed the dependency libraries on each worker node. You may find the libraries list from the gluten-package jar.
+With config `enable_vcpkg=OFF`, the dependency libraries won't be statically linked, instead the script will install the libraries to system then pack the dependency libraries into another jar named gluten-package-${Maven-artifact-version}.jar. Then you need to add the jar to extraClassPath then set `spark.gluten.loadLibFromJar=true`. Or you already manually deployed the dependency libraries on each worker node. You may find the libraries list from the gluten-package jar.
 
 ## HDFS support
 
@@ -138,7 +152,7 @@ cp /path/to/hdfs-client.xml hdfs-client.xml
 
 One typical deployment on Spark/HDFS cluster is to enable [short-circuit reading](https://hadoop.apache.org/docs/stable/hadoop-project-dist/hadoop-hdfs/ShortCircuitLocalReads.html). Short-circuit reads provide a substantial performance boost to many applications.
 
-By default libhdfs3 does not set the default hdfs domain socket path to support HDFS short-circuit read. If this feature is required in HDFS setup, users may need to setup the domain socket path correctly by patching the libhdfs3 source code or by setting the correct config environment. In Gluten the short-circuit domain socket path is set to "/var/lib/hadoop-hdfs/dn_socket" in [build_velox.sh](https://github.com/oap-project/gluten/blob/main/ep/build-velox/src/build_velox.sh) So we need to make sure the folder existed and user has write access as below script.
+By default libhdfs3 does not set the default hdfs domain socket path to support HDFS short-circuit read. If this feature is required in HDFS setup, users may need to setup the domain socket path correctly by patching the libhdfs3 source code or by setting the correct config environment. In Gluten the short-circuit domain socket path is set to "/var/lib/hadoop-hdfs/dn_socket" in [build_velox.sh](https://github.com/apache/incubator-gluten/blob/main/ep/build-velox/src/build_velox.sh) So we need to make sure the folder existed and user has write access as below script.
 
 ```
 sudo mkdir -p /var/lib/hadoop-hdfs/
@@ -193,7 +207,9 @@ Currently there are several ways to asscess S3 in Spark. Please refer [Velox S3]
 
 ## Celeborn support
 
-Gluten with velox backend supports [Celeborn](https://github.com/apache/incubator-celeborn) as remote shuffle service. Below introduction is used to enable this feature
+Gluten with velox backend supports [Celeborn](https://github.com/apache/incubator-celeborn) as remote shuffle service. Currently, the supported Celeborn versions are `0.3.x` and `0.4.0`.
+
+Below introduction is used to enable this feature
 
 First refer to this URL(https://github.com/apache/incubator-celeborn) to setup a celeborn cluster.
 
@@ -206,7 +222,7 @@ mvn clean package -Pbackends-velox -Pspark-3.3 -Prss -DskipTests
 Then add the Gluten and Spark Celeborn Client packages to your Spark application's classpath(usually add them into `$SPARK_HOME/jars`).
 
 - Celeborn: celeborn-client-spark-3-shaded_2.12-0.3.0-incubating.jar
-- Gluten: gluten-velox-bundle-spark3.x_2.12-xx-xx-SNAPSHOT.jar, gluten-thirdparty-lib-xx.jar
+- Gluten: gluten-velox-bundle-spark3.x_2.12-xx_xx_xx-SNAPSHOT.jar, gluten-thirdparty-lib-xx-xx.jar
 
 Currently to use Gluten following configurations are required in `spark-defaults.conf`
 
@@ -285,7 +301,7 @@ Spark3.3 has 387 functions in total. ~240 are commonly used. Velox's functions h
 To identify what can be offloaded in a query and detailed fallback reasons, user can follow below steps to retrieve corresponding logs.
 
 ```
-1) Enable Gluten by proper [configuration](https://github.com/oap-project/gluten/blob/main/docs/Configuration.md).
+1) Enable Gluten by proper [configuration](https://github.com/apache/incubator-gluten/blob/main/docs/Configuration.md).
 
 2) Disable Spark AQE to trigger plan validation in Gluten
 spark.sql.adaptive.enabled = false
@@ -326,7 +342,6 @@ Using the following configuration options to customize spilling:
 |--------------------------------------------------------------------------|---------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | spark.gluten.sql.columnar.backend.velox.spillStrategy                    | auto          | none: Disable spill on Velox backend; auto: Let Spark memory manager manage Velox's spilling                                                                                      |
 | spark.gluten.sql.columnar.backend.velox.spillFileSystem                  | local         | The filesystem used to store spill data. local: The local file system. heap-over-local: Write files to JVM heap if having extra heap space. Otherwise write to local file system. |
-| spark.gluten.sql.columnar.backend.velox.partialAggregationSpillEnabled   | true          | Whether spill is enabled on partial aggregations                                                                                                                                  |
 | spark.gluten.sql.columnar.backend.velox.aggregationSpillEnabled          | true          | Whether spill is enabled on aggregations                                                                                                                                          |
 | spark.gluten.sql.columnar.backend.velox.joinSpillEnabled                 | true          | Whether spill is enabled on joins                                                                                                                                                 |
 | spark.gluten.sql.columnar.backend.velox.orderBySpillEnabled              | true          | Whether spill is enabled on sorts                                                                                                                                                 |
@@ -739,7 +754,7 @@ var gluten_root = "/PATH/TO/GLUTEN"
 Below script shows an example about how to run the testing, you should modify the parameters such as executor cores, memory, offHeap size based on your environment. 
 
 ```bash
-export GLUTEN_JAR = /PATH/TO/GLUTEN/backends-velox/target/<gluten-jar>
+export GLUTEN_JAR = /PATH/TO/GLUTEN/package/target/<gluten-jar>
 cat tpch_parquet.scala | spark-shell --name tpch_powertest_velox \
   --master yarn --deploy-mode client \
   --conf spark.plugins=io.glutenproject.GlutenPlugin \
@@ -757,7 +772,7 @@ cat tpch_parquet.scala | spark-shell --name tpch_powertest_velox \
   --conf spark.driver.maxResultSize=32g
 ```
 
-Refer to [Gluten parameters ](../Configuration.md) for more details of each parameter used by Gluten.
+Refer to [Gluten configuration](../Configuration.md) for more details.
 
 ## Result
 *wholestagetransformer* indicates that the offload works.

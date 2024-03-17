@@ -19,6 +19,8 @@
 #include <AggregateFunctions/AggregateFunctionFactory.h>
 #include <DataTypes/IDataType.h>
 #include <Common/Exception.h>
+#include <google/protobuf/wrappers.pb.h>
+#include <Poco/StringTokenizer.h>
 
 namespace DB
 {
@@ -32,7 +34,7 @@ namespace ErrorCodes
 namespace local_engine
 {
 AggregateFunctionPtr RelParser::getAggregateFunction(
-    const DB::String & name, DB::DataTypes arg_types, DB::AggregateFunctionProperties & properties, const DB::Array & parameters)
+    const String & name, DB::DataTypes arg_types, DB::AggregateFunctionProperties & properties, const DB::Array & parameters)
 {
     auto & factory = AggregateFunctionFactory::instance();
     auto action = NullsAction::EMPTY;
@@ -70,6 +72,40 @@ DB::QueryPlanPtr RelParser::parseOp(const substrait::Rel & rel, std::list<const 
     return parse(std::move(query_plan), rel, rel_stack);
 }
 
+std::map<std::string, std::string> RelParser::parseFormattedRelAdvancedOptimization(const substrait::extensions::AdvancedExtension &advanced_extension)
+{
+    std::map<std::string, std::string> configs;
+    if (advanced_extension.has_optimization())
+    {
+        google::protobuf::StringValue msg;
+        advanced_extension.optimization().UnpackTo(&msg);
+        Poco::StringTokenizer kvs( msg.value(), "\n");
+        for (auto & kv : kvs)
+        {
+            if (kv.empty())
+                continue;
+            auto pos = kv.find('=');
+            if (pos == std::string::npos)
+            {
+                throw DB::Exception(DB::ErrorCodes::BAD_ARGUMENTS, "Invalid optimization config:{}.", kv);
+            }
+            auto key = kv.substr(0, pos);
+            auto value = kv.substr(pos + 1);
+            configs[key] = value;
+        }
+    }
+    return configs;
+}
+
+std::string RelParser::getStringConfig(const std::map<std::string, std::string> & configs, const std::string & key, const std::string & default_value)
+{
+    auto it = configs.find(key);
+    if (it == configs.end())
+        return default_value;
+    return it->second;
+}
+
+
 RelParserFactory & RelParserFactory::instance()
 {
     static RelParserFactory factory;
@@ -86,7 +122,7 @@ void RelParserFactory::registerBuilder(UInt32 k, RelParserBuilder builder)
     builders[k] = builder;
 }
 
-RelParserFactory::RelParserBuilder RelParserFactory::getBuilder(DB::UInt32 k)
+RelParserFactory::RelParserBuilder RelParserFactory::getBuilder(UInt32 k)
 {
     auto it = builders.find(k);
     if (it == builders.end())

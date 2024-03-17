@@ -21,7 +21,7 @@ import io.glutenproject.GlutenPlugin.{GLUTEN_SESSION_EXTENSION_NAME, SPARK_SESSI
 import io.glutenproject.backendsapi.BackendsApiManager
 import io.glutenproject.events.GlutenBuildInfoEvent
 import io.glutenproject.expression.ExpressionMappings
-import io.glutenproject.extension.{ColumnarOverrides, ColumnarQueryStagePrepOverrides, OthersExtensionOverrides, StrategyOverrides}
+import io.glutenproject.extension.{ColumnarOverrides, OthersExtensionOverrides, QueryStagePrepOverrides, StrategyOverrides}
 import io.glutenproject.test.TestStats
 import io.glutenproject.utils.TaskListener
 
@@ -148,6 +148,7 @@ private[glutenproject] class GlutenDriverPlugin extends DriverPlugin with Loggin
     }
     // Session's local time zone must be set. If not explicitly set by user, its default
     // value (detected for the platform) is used, consistent with spark.
+    conf.set(GLUTEN_DEFAULT_SESSION_TIMEZONE_KEY, SQLConf.SESSION_LOCAL_TIMEZONE.defaultValueString)
 
     // task slots
     val taskSlots = SparkResourceUtil.getTaskSlots(conf)
@@ -158,17 +159,11 @@ private[glutenproject] class GlutenDriverPlugin extends DriverPlugin with Loggin
     conf.set(GlutenConfig.GLUTEN_OFFHEAP_SIZE_IN_BYTES_KEY, offHeapSize.toString)
     val offHeapPerTask = offHeapSize / taskSlots
     conf.set(GlutenConfig.GLUTEN_TASK_OFFHEAP_SIZE_IN_BYTES_KEY, offHeapPerTask.toString)
-    conf.set(GLUTEN_DEFAULT_SESSION_TIMEZONE_KEY, SQLConf.SESSION_LOCAL_TIMEZONE.defaultValueString)
 
     // Pessimistic off-heap sizes, with the assumption that all non-borrowable storage memory
     // determined by spark.memory.storageFraction was used.
     val fraction = 1.0d - conf.getDouble("spark.memory.storageFraction", 0.5d)
-    val conservativeOffHeapSize = (offHeapSize
-      * fraction).toLong
-    conf.set(
-      GlutenConfig.GLUTEN_CONSERVATIVE_OFFHEAP_SIZE_IN_BYTES_KEY,
-      conservativeOffHeapSize.toString)
-    val conservativeOffHeapPerTask = conservativeOffHeapSize / taskSlots
+    val conservativeOffHeapPerTask = (offHeapSize * fraction).toLong / taskSlots
     conf.set(
       GlutenConfig.GLUTEN_CONSERVATIVE_TASK_OFFHEAP_SIZE_IN_BYTES_KEY,
       conservativeOffHeapPerTask.toString)
@@ -184,6 +179,16 @@ private[glutenproject] class GlutenDriverPlugin extends DriverPlugin with Loggin
       conf.set("spark.sql.parquet.enableVectorizedReader", "false")
       conf.set("spark.sql.orc.enableVectorizedReader", "false")
       conf.set("spark.sql.inMemoryColumnarStorage.enableVectorizedReader", "false")
+    }
+    // When the Velox cache is enabled, the Velox file handle cache should also be enabled.
+    // Otherwise, a 'reference id not found' error may occur.
+    if (
+      conf.getBoolean(GlutenConfig.COLUMNAR_VELOX_CACHE_ENABLED.key, false) && !conf.getBoolean(
+        GlutenConfig.COLUMNAR_VELOX_FILE_HANDLE_CACHE_ENABLED.key,
+        false)
+    ) {
+      throw new IllegalArgumentException(s"${GlutenConfig.COLUMNAR_VELOX_CACHE_ENABLED.key} and " +
+        s"${GlutenConfig.COLUMNAR_VELOX_FILE_HANDLE_CACHE_ENABLED.key} should be enabled together.")
     }
   }
 }
@@ -263,7 +268,7 @@ private[glutenproject] object GlutenPlugin {
 
   /** Specify all injectors that Gluten is using in following list. */
   val DEFAULT_INJECTORS: List[GlutenSparkExtensionsInjector] = List(
-    ColumnarQueryStagePrepOverrides,
+    QueryStagePrepOverrides,
     ColumnarOverrides,
     StrategyOverrides,
     OthersExtensionOverrides

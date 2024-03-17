@@ -21,8 +21,9 @@ import io.glutenproject.expression.{ConverterUtils, ExpressionConverter}
 import io.glutenproject.extension.ValidationResult
 import io.glutenproject.substrait.`type`.ColumnTypeNode
 import io.glutenproject.substrait.SubstraitContext
+import io.glutenproject.substrait.extensions.ExtensionBuilder
 import io.glutenproject.substrait.plan.PlanBuilder
-import io.glutenproject.substrait.rel.{ReadRelNode, RelBuilder, SplitInfo}
+import io.glutenproject.substrait.rel.{RelBuilder, SplitInfo}
 import io.glutenproject.substrait.rel.LocalFilesNode.ReadFileFormat
 
 import org.apache.spark.rdd.RDD
@@ -31,15 +32,19 @@ import org.apache.spark.sql.types.BooleanType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 import com.google.common.collect.Lists
+import com.google.protobuf.StringValue
 
 import scala.collection.JavaConverters._
 
 trait BasicScanExecTransformer extends LeafTransformSupport with BaseDataSource {
+  import org.apache.spark.sql.catalyst.util._
 
   /** Returns the filters that can be pushed down to native file scan */
   def filterExprs(): Seq[Expression]
 
   def outputAttributes(): Seq[Attribute]
+
+  def getMetadataColumns(): Seq[AttributeReference]
 
   /** This can be used to report FileFormat for a file based scan operator. */
   val fileFormat: ReadFileFormat
@@ -54,15 +59,18 @@ trait BasicScanExecTransformer extends LeafTransformSupport with BaseDataSource 
     }
   }
 
+  /** Returns the file format properties. */
+  def getProperties: Map[String, String] = Map.empty
+
   /** Returns the split infos that will be processed by the underlying native engine. */
   def getSplitInfos: Seq[SplitInfo] = {
     getPartitions.map(
       BackendsApiManager.getIteratorApiInstance
-        .genSplitInfo(_, getPartitionSchema, fileFormat))
+        .genSplitInfo(_, getPartitionSchema, fileFormat, getMetadataColumns.map(_.name)))
   }
 
   def doExecuteColumnarInternal(): RDD[ColumnarBatch] = {
-    val numOutputRows = longMetric("outputRows")
+    val numOutputRows = longMetric("numOutputRows")
     val numOutputVectors = longMetric("outputVectors")
     val scanTime = longMetric("scanTime")
     val substraitContext = new SubstraitContext
@@ -75,6 +83,7 @@ trait BasicScanExecTransformer extends LeafTransformSupport with BaseDataSource 
       sparkContext,
       WholeStageTransformContext(planNode, substraitContext),
       getSplitInfos,
+      this,
       numOutputRows,
       numOutputVectors,
       scanTime
@@ -82,18 +91,16 @@ trait BasicScanExecTransformer extends LeafTransformSupport with BaseDataSource 
   }
 
   override protected def doValidateInternal(): ValidationResult = {
-    val fileFormat = ConverterUtils.getFileFormat(this)
-    if (
-      !BackendsApiManager.getSettings
-        .supportFileFormatRead(
-          fileFormat,
-          schema.fields,
-          getPartitionSchema.nonEmpty,
-          getInputFilePaths)
-    ) {
-      return ValidationResult.notOk(
-        s"Not supported file format or complex type for scan: $fileFormat")
+    val validationResult = BackendsApiManager.getSettings
+      .supportFileFormatRead(
+        fileFormat,
+        schema.fields,
+        getPartitionSchema.nonEmpty,
+        getInputFilePaths)
+    if (!validationResult.isValid) {
+      return validationResult
     }
+
     val substraitContext = new SubstraitContext
     val relNode = doTransform(substraitContext).root
 
@@ -108,6 +115,8 @@ trait BasicScanExecTransformer extends LeafTransformSupport with BaseDataSource 
       attr =>
         if (getPartitionSchema.exists(_.name.equals(attr.name))) {
           new ColumnTypeNode(1)
+        } else if (attr.isMetadataCol) {
+          new ColumnTypeNode(2)
         } else {
           new ColumnTypeNode(0)
         }
@@ -124,14 +133,23 @@ trait BasicScanExecTransformer extends LeafTransformSupport with BaseDataSource 
     val filterNodes = transformer.map(_.doTransform(context.registeredFunction))
     val exprNode = filterNodes.orNull
 
-    val relNode = RelBuilder.makeReadRel(
+    // used by CH backend
+    val optimizationContent =
+      s"isMergeTree=${if (this.fileFormat == ReadFileFormat.MergeTreeReadFormat) "1" else "0"}\n"
+
+    val optimization =
+      BackendsApiManager.getTransformerApiInstance.packPBMessage(
+        StringValue.newBuilder.setValue(optimizationContent).build)
+    val extensionNode = ExtensionBuilder.makeAdvancedExtension(optimization, null)
+
+    val readNode = RelBuilder.makeReadRel(
       typeNodes,
       nameList,
       columnTypeNodes,
       exprNode,
+      extensionNode,
       context,
       context.nextOperatorId(this.nodeName))
-    relNode.asInstanceOf[ReadRelNode].setDataSchema(getDataSchema)
-    TransformContext(output, output, relNode)
+    TransformContext(output, output, readNode)
   }
 }

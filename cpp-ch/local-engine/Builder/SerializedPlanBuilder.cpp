@@ -17,6 +17,7 @@
 #include "SerializedPlanBuilder.h"
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeDateTime64.h>
+#include <DataTypes/DataTypeLowCardinality.h>
 #include <DataTypes/DataTypeMap.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypeTuple.h>
@@ -181,26 +182,6 @@ SerializedPlanBuilder & SerializedPlanBuilder::read(const std::string & path, Sc
     return *this;
 }
 
-SerializedPlanBuilder & SerializedPlanBuilder::readMergeTree(
-    const std::string & database,
-    const std::string & table,
-    const std::string & relative_path,
-    int min_block,
-    int max_block,
-    SchemaPtr schema)
-{
-    substrait::Rel * rel = new substrait::Rel();
-    auto * read = rel->mutable_read();
-    read->mutable_extension_table()->mutable_detail()->set_value(local_engine::MergeTreeTable{
-        .database = database, .table = table, .relative_path = relative_path, .min_block = min_block, .max_block = max_block}
-                                                                     .toString());
-    read->set_allocated_base_schema(schema);
-    setInputToPrev(rel);
-    this->prev_rel = rel;
-    return *this;
-}
-
-
 std::unique_ptr<substrait::Plan> SerializedPlanBuilder::build()
 {
     return std::move(this->plan);
@@ -240,12 +221,15 @@ SerializedPlanBuilder & SerializedPlanBuilder::project(const std::vector<substra
 
 std::shared_ptr<substrait::Type> SerializedPlanBuilder::buildType(const DB::DataTypePtr & ch_type)
 {
-    const auto * ch_type_nullable = checkAndGetDataType<DataTypeNullable>(ch_type.get());
+    const auto ch_type_wo_lowcardinality = DB::removeLowCardinality(ch_type);
+
+    const auto * ch_type_nullable = checkAndGetDataType<DataTypeNullable>(ch_type_wo_lowcardinality.get());
+
     const bool is_nullable = (ch_type_nullable != nullptr);
     auto type_nullability
         = is_nullable ? substrait::Type_Nullability_NULLABILITY_NULLABLE : substrait::Type_Nullability_NULLABILITY_REQUIRED;
 
-    const auto ch_type_without_nullable = DB::removeNullable(ch_type);
+    const auto ch_type_without_nullable = DB::removeNullable(ch_type_wo_lowcardinality);
     const DB::WhichDataType which(ch_type_without_nullable);
 
     auto res = std::make_shared<substrait::Type>();

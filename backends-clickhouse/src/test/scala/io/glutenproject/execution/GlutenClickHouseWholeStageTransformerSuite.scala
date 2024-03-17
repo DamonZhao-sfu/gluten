@@ -16,4 +16,61 @@
  */
 package io.glutenproject.execution
 
-abstract class GlutenClickHouseWholeStageTransformerSuite extends WholeStageTransformerSuite {}
+import io.glutenproject.GlutenConfig
+import io.glutenproject.utils.UTSystemParameters
+
+import org.apache.spark.SparkConf
+import org.apache.spark.sql.execution.datasources.v2.clickhouse.ClickHouseConfig
+
+import org.apache.commons.io.FileUtils
+
+import java.io.File
+
+class GlutenClickHouseWholeStageTransformerSuite extends WholeStageTransformerSuite {
+
+  val DBL_EPSILON = 2.2204460492503131e-16
+  val DBL_RELAX_EPSILON: Double = Math.pow(10, -11)
+  val FLT_EPSILON = 1.19209290e-07f
+  def AlmostEqualsIsRel(expected: Double, actual: Double, EPSILON: Double = DBL_EPSILON): Unit = {
+    val diff = Math.abs(expected - actual)
+    val epsilon = EPSILON * Math.max(Math.abs(expected), Math.abs(actual))
+    if (diff > epsilon) {
+      fail(s"""
+              |expected: $expected
+              |actual:   $actual
+              | abs(expected-expected) ~ epsilon = $diff ~ $epsilon
+              |""".stripMargin)
+    }
+  }
+
+  override protected def sparkConf: SparkConf =
+    super.sparkConf
+      .set(GlutenConfig.GLUTEN_LIB_PATH, UTSystemParameters.getClickHouseLibPath())
+      .set(
+        "spark.gluten.sql.columnar.backend.ch.use.v2",
+        ClickHouseConfig.DEFAULT_USE_DATASOURCE_V2)
+      .set("spark.gluten.sql.enable.native.validation", "false")
+      .set("spark.sql.warehouse.dir", warehouse)
+
+  override def beforeAll(): Unit = {
+    // prepare working paths
+    val basePathDir = new File(basePath)
+    if (basePathDir.exists()) {
+      FileUtils.forceDelete(basePathDir)
+    }
+    FileUtils.forceMkdir(basePathDir)
+    FileUtils.forceMkdir(new File(warehouse))
+    FileUtils.forceMkdir(new File(metaStorePathAbsolute))
+    super.beforeAll()
+  }
+
+  protected val rootPath = this.getClass.getResource("/").getPath
+  protected val basePath = rootPath + "tests-working-home"
+  protected val warehouse = basePath + "/spark-warehouse"
+  protected val metaStorePathAbsolute = basePath + "/meta"
+  protected val hiveMetaStoreDB = metaStorePathAbsolute + "/metastore_db"
+
+  override protected val backend: String = "ch"
+  final override protected val resourcePath: String = "" // ch not need this
+  override protected val fileFormat: String = "parquet"
+}

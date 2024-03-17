@@ -17,7 +17,7 @@
 package io.glutenproject.backendsapi
 
 import io.glutenproject.GlutenNumaBindingInfo
-import io.glutenproject.execution.{BaseGlutenPartition, BroadCastHashJoinContext, WholeStageTransformContext}
+import io.glutenproject.execution.{BaseGlutenPartition, BasicScanExecTransformer, WholeStageTransformContext}
 import io.glutenproject.metrics.IMetrics
 import io.glutenproject.substrait.plan.PlanNode
 import io.glutenproject.substrait.rel.LocalFilesNode.ReadFileFormat
@@ -26,7 +26,6 @@ import io.glutenproject.substrait.rel.SplitInfo
 import org.apache.spark._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.connector.read.InputPartition
-import org.apache.spark.sql.execution.joins.BuildSideRelation
 import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.utils.OASPackageBridge.InputMetricsWrapper
@@ -34,21 +33,27 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 
 trait IteratorApi {
 
-  /**
-   * Generate native row partition.
-   *
-   * @return
-   */
   def genSplitInfo(
       partition: InputPartition,
       partitionSchema: StructType,
-      fileFormat: ReadFileFormat): SplitInfo
+      fileFormat: ReadFileFormat,
+      metadataColumnNames: Seq[String]): SplitInfo
+
+  /** Generate native row partition. */
+  def genPartitions(
+      wsCtx: WholeStageTransformContext,
+      splitInfos: Seq[Seq[SplitInfo]],
+      scans: Seq[BasicScanExecTransformer]): Seq[BaseGlutenPartition]
+
+  /**
+   * Inject the task attempt temporary path for native write files, this method should be called
+   * before `genFirstStageIterator` or `genFinalStageIterator`
+   */
+  def injectWriteFilesTempPath(path: String): Unit = throw new UnsupportedOperationException()
 
   /**
    * Generate Iterator[ColumnarBatch] for first stage. ("first" means it does not depend on other
    * SCAN inputs)
-   *
-   * @return
    */
   def genFirstStageIterator(
       inputPartition: BaseGlutenPartition,
@@ -56,14 +61,13 @@ trait IteratorApi {
       pipelineTime: SQLMetric,
       updateInputMetrics: (InputMetricsWrapper) => Unit,
       updateNativeMetrics: IMetrics => Unit,
+      partitionIndex: Int,
       inputIterators: Seq[Iterator[ColumnarBatch]] = Seq()
   ): Iterator[ColumnarBatch]
 
   /**
    * Generate Iterator[ColumnarBatch] for final stage. ("Final" means it depends on other SCAN
    * inputs, maybe it was a mistake to use the word "final")
-   *
-   * @return
    */
   // scalastyle:off argcount
   def genFinalStageIterator(
@@ -74,7 +78,7 @@ trait IteratorApi {
       rootNode: PlanNode,
       pipelineTime: SQLMetric,
       updateNativeMetrics: IMetrics => Unit,
-      buildRelationBatchHolder: Seq[ColumnarBatch],
+      partitionIndex: Int,
       materializeInput: Boolean = false): Iterator[ColumnarBatch]
   // scalastyle:on argcount
 
@@ -83,12 +87,8 @@ trait IteratorApi {
       sparkContext: SparkContext,
       wsCxt: WholeStageTransformContext,
       splitInfos: Seq[SplitInfo],
+      scan: BasicScanExecTransformer,
       numOutputRows: SQLMetric,
       numOutputBatches: SQLMetric,
       scanTime: SQLMetric): RDD[ColumnarBatch]
-
-  /** Compute for BroadcastBuildSideRDD */
-  def genBroadcastBuildSideIterator(
-      broadcasted: broadcast.Broadcast[BuildSideRelation],
-      broadCastContext: BroadCastHashJoinContext): Iterator[ColumnarBatch]
 }

@@ -28,7 +28,6 @@
 #include "memory/AllocationListener.h"
 #include "shuffle/rss/RssClient.h"
 #include "utils/Compression.h"
-#include "utils/DebugOut.h"
 #include "utils/exception.h"
 
 static jint jniVersion = JNI_VERSION_1_8;
@@ -52,7 +51,7 @@ static inline void checkException(JNIEnv* env) {
     std::string description =
         jStringToCString(env, (jstring)env->CallStaticObjectMethod(describerClass, describeMethod, t));
     if (env->ExceptionCheck()) {
-      std::cerr << "Fatal: Uncaught Java exception during calling the Java exception describer method! " << std::endl;
+      LOG(WARNING) << "Fatal: Uncaught Java exception during calling the Java exception describer method! ";
     }
     throw gluten::GlutenException("Error during calling Java code from native code: " + description);
   }
@@ -106,13 +105,13 @@ static inline jmethodID getStaticMethodIdOrError(JNIEnv* env, jclass thisClass, 
 static inline void attachCurrentThreadAsDaemonOrThrow(JavaVM* vm, JNIEnv** out) {
   int getEnvStat = vm->GetEnv(reinterpret_cast<void**>(out), jniVersion);
   if (getEnvStat == JNI_EDETACHED) {
-    DEBUG_OUT << "JNIEnv was not attached to current thread." << std::endl;
+    DLOG(INFO) << "JNIEnv was not attached to current thread.";
     // Reattach current thread to JVM
     getEnvStat = vm->AttachCurrentThreadAsDaemon(reinterpret_cast<void**>(out), NULL);
     if (getEnvStat != JNI_OK) {
       throw gluten::GlutenException("Failed to reattach current thread to JVM.");
     }
-    DEBUG_OUT << "Succeeded attaching current thread." << std::endl;
+    DLOG(INFO) << "Succeeded attaching current thread.";
     return;
   }
   if (getEnvStat != JNI_OK) {
@@ -152,6 +151,106 @@ inline JniCommonState* getJniCommonState() {
 }
 
 Runtime* getRuntime(JNIEnv* env, jobject runtimeAware);
+
+// Safe version of JNI {Get|Release}<PrimitiveType>ArrayElements routines.
+// SafeNativeArray would release the managed array elements automatically
+// during destruction.
+
+enum class JniPrimitiveArrayType {
+  kBoolean = 0,
+  kByte = 1,
+  kChar = 2,
+  kShort = 3,
+  kInt = 4,
+  kLong = 5,
+  kFloat = 6,
+  kDouble = 7
+};
+
+#define CONCATENATE(t1, t2, t3) t1##t2##t3
+
+#define DEFINE_PRIMITIVE_ARRAY(PRIM_TYPE, JAVA_TYPE, JNI_NATIVE_TYPE, NATIVE_TYPE, METHOD_VAR) \
+  template <>                                                                                  \
+  struct JniPrimitiveArray<JniPrimitiveArrayType::PRIM_TYPE> {                                 \
+    using JavaType = JAVA_TYPE;                                                                \
+    using JniNativeType = JNI_NATIVE_TYPE;                                                     \
+    using NativeType = NATIVE_TYPE;                                                            \
+                                                                                               \
+    static JniNativeType get(JNIEnv* env, JavaType javaArray) {                                \
+      return env->CONCATENATE(Get, METHOD_VAR, ArrayElements)(javaArray, nullptr);             \
+    }                                                                                          \
+                                                                                               \
+    static void release(JNIEnv* env, JavaType javaArray, JniNativeType nativeArray) {          \
+      env->CONCATENATE(Release, METHOD_VAR, ArrayElements)(javaArray, nativeArray, JNI_ABORT); \
+    }                                                                                          \
+  };
+
+template <JniPrimitiveArrayType TYPE>
+struct JniPrimitiveArray {};
+
+DEFINE_PRIMITIVE_ARRAY(kBoolean, jbooleanArray, jboolean*, bool*, Boolean)
+DEFINE_PRIMITIVE_ARRAY(kByte, jbyteArray, jbyte*, uint8_t*, Byte)
+DEFINE_PRIMITIVE_ARRAY(kChar, jcharArray, jchar*, uint16_t*, Char)
+DEFINE_PRIMITIVE_ARRAY(kShort, jshortArray, jshort*, int16_t*, Short)
+DEFINE_PRIMITIVE_ARRAY(kInt, jintArray, jint*, int32_t*, Int)
+DEFINE_PRIMITIVE_ARRAY(kLong, jlongArray, jlong*, int64_t*, Long)
+DEFINE_PRIMITIVE_ARRAY(kFloat, jfloatArray, jfloat*, float_t*, Float)
+DEFINE_PRIMITIVE_ARRAY(kDouble, jdoubleArray, jdouble*, double_t*, Double)
+
+template <JniPrimitiveArrayType TYPE>
+class SafeNativeArray {
+  using PrimitiveArray = JniPrimitiveArray<TYPE>;
+  using JavaArrayType = typename PrimitiveArray::JavaType;
+  using JniNativeArrayType = typename PrimitiveArray::JniNativeType;
+  using NativeArrayType = typename PrimitiveArray::NativeType;
+
+ public:
+  virtual ~SafeNativeArray() {
+    PrimitiveArray::release(env_, javaArray_, nativeArray_);
+  }
+
+  SafeNativeArray(const SafeNativeArray&) = delete;
+  SafeNativeArray(SafeNativeArray&&) = delete;
+  SafeNativeArray& operator=(const SafeNativeArray&) = delete;
+  SafeNativeArray& operator=(SafeNativeArray&&) = delete;
+
+  const NativeArrayType elems() const {
+    return reinterpret_cast<const NativeArrayType>(nativeArray_);
+  }
+
+  const jsize length() const {
+    return env_->GetArrayLength(javaArray_);
+  }
+
+  static SafeNativeArray<TYPE> get(JNIEnv* env, JavaArrayType javaArray) {
+    JniNativeArrayType nativeArray = PrimitiveArray::get(env, javaArray);
+    return SafeNativeArray<TYPE>(env, javaArray, nativeArray);
+  }
+
+ private:
+  SafeNativeArray(JNIEnv* env, JavaArrayType javaArray, JniNativeArrayType nativeArray)
+      : env_(env), javaArray_(javaArray), nativeArray_(nativeArray){};
+
+  JNIEnv* env_;
+  JavaArrayType javaArray_;
+  JniNativeArrayType nativeArray_;
+};
+
+#define DEFINE_SAFE_GET_PRIMITIVE_ARRAY_FUNCTIONS(PRIM_TYPE, JAVA_TYPE, METHOD_VAR)                         \
+  inline SafeNativeArray<JniPrimitiveArrayType::PRIM_TYPE> CONCATENATE(get, METHOD_VAR, ArrayElementsSafe)( \
+      JNIEnv * env, JAVA_TYPE array) {                                                                      \
+    return SafeNativeArray<JniPrimitiveArrayType::PRIM_TYPE>::get(env, array);                              \
+  }
+
+DEFINE_SAFE_GET_PRIMITIVE_ARRAY_FUNCTIONS(kBoolean, jbooleanArray, Boolean)
+DEFINE_SAFE_GET_PRIMITIVE_ARRAY_FUNCTIONS(kByte, jbyteArray, Byte)
+DEFINE_SAFE_GET_PRIMITIVE_ARRAY_FUNCTIONS(kChar, jcharArray, Char)
+DEFINE_SAFE_GET_PRIMITIVE_ARRAY_FUNCTIONS(kShort, jshortArray, Short)
+DEFINE_SAFE_GET_PRIMITIVE_ARRAY_FUNCTIONS(kInt, jintArray, Int)
+DEFINE_SAFE_GET_PRIMITIVE_ARRAY_FUNCTIONS(kLong, jlongArray, Long)
+DEFINE_SAFE_GET_PRIMITIVE_ARRAY_FUNCTIONS(kFloat, jfloatArray, Float)
+DEFINE_SAFE_GET_PRIMITIVE_ARRAY_FUNCTIONS(kDouble, jdoubleArray, Double)
+
 } // namespace gluten
 
 // TODO: Move the static functions to namespace gluten
@@ -161,7 +260,7 @@ static inline void backtrace() {
   auto size = backtrace(array, 1024);
   char** strings = backtrace_symbols(array, size);
   for (size_t i = 0; i < size; ++i) {
-    std::cout << strings[i] << std::endl;
+    LOG(INFO) << strings[i];
   }
   free(strings);
 }
@@ -229,8 +328,8 @@ class SparkAllocationListener final : public gluten::AllocationListener {
   ~SparkAllocationListener() override {
     JNIEnv* env;
     if (vm_->GetEnv(reinterpret_cast<void**>(&env), jniVersion) != JNI_OK) {
-      std::cerr << "SparkAllocationListener#~SparkAllocationListener(): "
-                << "JNIEnv was not attached to current thread" << std::endl;
+      LOG(WARNING) << "SparkAllocationListener#~SparkAllocationListener(): "
+                   << "JNIEnv was not attached to current thread";
       return;
     }
     env->DeleteGlobalRef(jListenerGlobalRef_);
@@ -329,8 +428,8 @@ class CelebornClient : public RssClient {
   ~CelebornClient() {
     JNIEnv* env;
     if (vm_->GetEnv(reinterpret_cast<void**>(&env), jniVersion) != JNI_OK) {
-      std::cerr << "CelebornClient#~CelebornClient(): "
-                << "JNIEnv was not attached to current thread" << std::endl;
+      LOG(WARNING) << "CelebornClient#~CelebornClient(): "
+                   << "JNIEnv was not attached to current thread";
       return;
     }
     env->DeleteGlobalRef(javaCelebornShuffleWriter_);
@@ -339,7 +438,7 @@ class CelebornClient : public RssClient {
     env->DeleteGlobalRef(array_);
   }
 
-  int32_t pushPartitionData(int32_t partitionId, char* bytes, int64_t size) {
+  int32_t pushPartitionData(int32_t partitionId, char* bytes, int64_t size) override {
     JNIEnv* env;
     if (vm_->GetEnv(reinterpret_cast<void**>(&env), jniVersion) != JNI_OK) {
       throw gluten::GlutenException("JNIEnv was not attached to current thread");
@@ -359,8 +458,9 @@ class CelebornClient : public RssClient {
     return static_cast<int32_t>(celebornBytesSize);
   }
 
-  void stop() {}
+  void stop() override {}
 
+ private:
   JavaVM* vm_;
   jobject javaCelebornShuffleWriter_;
   jmethodID javaCelebornPushPartitionData_;

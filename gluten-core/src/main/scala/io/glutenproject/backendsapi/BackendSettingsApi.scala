@@ -17,15 +17,17 @@
 package io.glutenproject.backendsapi
 
 import io.glutenproject.GlutenConfig
+import io.glutenproject.extension.ValidationResult
 import io.glutenproject.substrait.rel.LocalFilesNode.ReadFileFormat
 
 import org.apache.spark.SparkConf
+import org.apache.spark.sql.catalyst.catalog.BucketSpec
 import org.apache.spark.sql.catalyst.expressions.NamedExpression
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.command.CreateDataSourceTableAsSelectCommand
-import org.apache.spark.sql.execution.datasources.InsertIntoHadoopFsRelationCommand
+import org.apache.spark.sql.execution.datasources.{FileFormat, InsertIntoHadoopFsRelationCommand}
 import org.apache.spark.sql.types.StructField
 
 trait BackendSettingsApi {
@@ -33,7 +35,13 @@ trait BackendSettingsApi {
       format: ReadFileFormat,
       fields: Array[StructField],
       partTable: Boolean,
-      paths: Seq[String]): Boolean = false
+      paths: Seq[String]): ValidationResult = ValidationResult.ok
+  def supportWriteFilesExec(
+      format: FileFormat,
+      fields: Array[StructField],
+      bucketSpec: Option[BucketSpec],
+      options: Map[String, String]): ValidationResult = ValidationResult.ok
+  def supportNativeMetadataColumns(): Boolean = false
   def supportExpandExec(): Boolean = false
   def supportSortExec(): Boolean = false
   def supportSortMergeJoinExec(): Boolean = true
@@ -64,7 +72,6 @@ trait BackendSettingsApi {
       GlutenConfig.VANILLA_VECTORIZED_READERS_ENABLED.defaultValue.get)
 
   def recreateJoinExecOnFallback(): Boolean = false
-  def removeHashColumnFromColumnarShuffleExchangeExec(): Boolean = false
 
   /**
    * A shuffle key may be an expression. We would add a projection for this expression shuffle key
@@ -74,8 +81,6 @@ trait BackendSettingsApi {
   def supportShuffleWithProject(outputPartitioning: Partitioning, child: SparkPlan): Boolean = false
   def utilizeShuffledHashJoinHint(): Boolean = false
   def excludeScanExecFromCollapsedStage(): Boolean = false
-  def avoidOverwritingFilterTransformer(): Boolean = false
-  def fallbackFilterWithoutConjunctiveScan(): Boolean = false
   def rescaleDecimalLiteral: Boolean = false
 
   /**
@@ -110,7 +115,24 @@ trait BackendSettingsApi {
 
   def staticPartitionWriteOnly(): Boolean = false
 
+  def supportTransformWriteFiles: Boolean = false
+
   def requiredInputFilePaths(): Boolean = false
 
   def enableBloomFilterAggFallbackRule(): Boolean = true
+
+  def enableNativeWriteFiles(): Boolean
+
+  def shouldRewriteCount(): Boolean = false
+
+  def supportCartesianProductExec(): Boolean = false
+
+  def supportBroadcastNestedLoopJoinExec(): Boolean = false
+
+  /** Merge two phases hash based aggregate if need */
+  def mergeTwoPhasesHashBaseAggregateIfNeed(): Boolean = false
+
+  def shouldRewriteTypedImperativeAggregate(): Boolean = false
+
+  def shouldRewriteCollect(): Boolean = false
 }
