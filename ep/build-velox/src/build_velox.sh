@@ -118,7 +118,7 @@ function compile {
     COMPILE_OPTION="$COMPILE_OPTION -DVELOX_BUILD_BENCHMARKS=ON"
   fi
 
-  COMPILE_OPTION="$COMPILE_OPTION -DCMAKE_BUILD_TYPE=${BUILD_TYPE}"
+  COMPILE_OPTION="$COMPILE_OPTION -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DCMAKE_INSTALL_PREFIX=/localhdd/hza215"
   COMPILE_TYPE=$(if [[ "$BUILD_TYPE" == "debug" ]] || [[ "$BUILD_TYPE" == "Debug" ]]; then echo 'debug'; else echo 'release'; fi)
   echo "COMPILE_OPTION: "$COMPILE_OPTION
 
@@ -139,15 +139,15 @@ function compile {
     if [ -d xsimd-build ]; then
       echo "INSTALL xsimd."
       if [ $OS == 'Linux' ]; then
-        sudo cmake --install xsimd-build/
+        /localhdd/hza215/cmake-3.28.1/bin/cmake --install xsimd-build/
       elif [ $OS == 'Darwin' ]; then
-        cmake --install xsimd-build/
+        /localhdd/hza215/cmake-3.28.1/bin/cmake --install xsimd-build/
       fi
     fi
     if [ -d gtest-build ]; then
       echo "INSTALL gtest."
       if [ $OS == 'Linux' ]; then
-        sudo cmake --install gtest-build/
+        /localhdd/hza215/cmake-3.28.1/bin/cmake --install gtest-build/
       elif [ $OS == 'Darwin' ]; then
         cmake --install gtest-build/
       fi

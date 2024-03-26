@@ -76,7 +76,7 @@ done
 
 function process_setup_ubuntu {
   if [ -z "$(which git)" ]; then
-    sudo --preserve-env apt install -y git
+    --preserve-env apt install -y git
   fi
   # make this function Reentrant
   git checkout scripts/setup-ubuntu.sh
@@ -247,8 +247,8 @@ git submodule update --init --recursive
 function apply_compilation_fixes {
   current_dir=$1
   velox_home=$2
-  sudo cp ${current_dir}/modify_velox.patch ${velox_home}/
-  sudo cp ${current_dir}/modify_arrow.patch ${velox_home}/third_party/
+  cp ${current_dir}/modify_velox.patch ${velox_home}/
+  cp ${current_dir}/modify_arrow.patch ${velox_home}/third_party/
   git add ${velox_home}/modify_velox.patch # to avoid the file from being deleted by git clean -dffx :/
   git add ${velox_home}/third_party/modify_arrow.patch # to avoid the file from being deleted by git clean -dffx :/
   cd ${velox_home}

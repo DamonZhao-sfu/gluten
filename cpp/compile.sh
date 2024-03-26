@@ -128,7 +128,7 @@ if [ -d build ]; then
 fi
 mkdir build
 cd build
-cmake .. \
+/localhdd/hza215/cmake-3.28.1/bin/cmake .. \
   -DBUILD_TESTS=${BUILD_TESTS} \
   -DBUILD_EXAMPLES=${BUILD_EXAMPLES} \
   -DBUILD_JEMALLOC=${BUILD_JEMALLOC} \
