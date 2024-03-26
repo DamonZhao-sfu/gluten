@@ -103,6 +103,9 @@ class GlutenConfig(conf: SQLConf) extends Logging {
   def forceComplexTypeScanFallbackEnabled: Boolean =
     conf.getConf(VELOX_FORCE_COMPLEX_TYPE_SCAN_FALLBACK)
 
+  def forceOrcCharTypeScanFallbackEnabled: Boolean =
+    conf.getConf(VELOX_FORCE_ORC_CHAR_TYPE_SCAN_FALLBACK)
+
   // whether to use ColumnarShuffleManager
   def isUseColumnarShuffleManager: Boolean =
     conf
@@ -289,10 +292,17 @@ class GlutenConfig(conf: SQLConf) extends Logging {
 
   def expressionBlacklist: Set[String] = {
     val blacklist = conf.getConf(EXPRESSION_BLACK_LIST)
-    if (blacklist.isDefined) {
+    val blacklistSet: Set[String] = if (blacklist.isDefined) {
       blacklist.get.toLowerCase(Locale.ROOT).trim.split(",").toSet
     } else {
       Set.empty
+    }
+
+    if (conf.getConf(FALLBACK_REGEXP_EXPRESSIONS)) {
+      val regexpList = "rlike,regexp_replace,regexp_extract,regexp_extract_all,split"
+      regexpList.trim.split(",").toSet ++ blacklistSet
+    } else {
+      blacklistSet
     }
   }
 
@@ -350,6 +360,8 @@ class GlutenConfig(conf: SQLConf) extends Logging {
   def enableColumnarProjectCollapse: Boolean = conf.getConf(ENABLE_COLUMNAR_PROJECT_COLLAPSE)
 
   def awsSdkLogLevel: String = conf.getConf(AWS_SDK_LOG_LEVEL)
+
+  def enableCastAvgAggregateFunction: Boolean = conf.getConf(COLUMNAR_NATIVE_CAST_AGGREGATE_ENABLED)
 }
 
 object GlutenConfig {
@@ -1411,6 +1423,15 @@ object GlutenConfig {
       .stringConf
       .createOptional
 
+  val FALLBACK_REGEXP_EXPRESSIONS =
+    buildConf("spark.gluten.sql.fallbackRegexpExpressions")
+      .doc(
+        "If true, fall back all regexp expressions. There are a few incompatible cases" +
+          " between RE2 (used by native engine) and java.util.regex (used by Spark). User should" +
+          " enable this property if their incompatibility is intolerable.")
+      .booleanConf
+      .createWithDefault(false)
+
   val FALLBACK_REPORTER_ENABLED =
     buildConf("spark.gluten.sql.columnar.fallbackReporter")
       .doc("When true, enable fallback reporter rule to print fallback reason")
@@ -1679,6 +1700,19 @@ object GlutenConfig {
     buildConf("spark.gluten.sql.complexType.scan.fallback.enabled")
       .internal()
       .doc("Force fallback for complex type scan, including struct, map, array.")
+      .booleanConf
+      .createWithDefault(true)
+
+  val VELOX_FORCE_ORC_CHAR_TYPE_SCAN_FALLBACK =
+    buildConf("spark.gluten.sql.orc.charType.scan.fallback.enabled")
+      .internal()
+      .doc("Force fallback for orc char type scan.")
+      .booleanConf
+      .createWithDefault(true)
+
+  val COLUMNAR_NATIVE_CAST_AGGREGATE_ENABLED =
+    buildConf("spark.gluten.sql.columnar.cast.avg")
+      .internal()
       .booleanConf
       .createWithDefault(true)
 }

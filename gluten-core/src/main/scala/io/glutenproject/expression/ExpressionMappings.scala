@@ -96,6 +96,7 @@ object ExpressionMappings {
     Sig[StringDecode](DECODE),
     Sig[Encode](ENCODE),
     Sig[Uuid](UUID),
+    Sig[BitLength](BIT_LENGTH),
 
     // URL functions
     Sig[ParseUrl](PARSE_URL),
@@ -177,6 +178,7 @@ object ExpressionMappings {
     Sig[LastDay](LAST_DAY),
     Sig[MonthsBetween](MONTHS_BETWEEN),
     Sig[DateFromUnixDate](DATE_FROM_UNIX_DATE),
+    Sig[MakeTimestamp](MAKE_TIMESTAMP),
     // JSON functions
     Sig[GetJsonObject](GET_JSON_OBJECT),
     Sig[LengthOfJsonArray](JSON_ARRAY_LENGTH),
@@ -242,6 +244,8 @@ object ExpressionMappings {
     Sig[CheckOverflow](CHECK_OVERFLOW),
     Sig[MakeDecimal](MAKE_DECIMAL),
     Sig[PromotePrecision](PROMOTE_PRECISION),
+    Sig[MonotonicallyIncreasingID](MONOTONICALLY_INCREASING_ID),
+    Sig[SparkPartitionID](SPARK_PARTITION_ID),
     // Decimal
     Sig[UnscaledValue](UNSCALED_VALUE)
   ) ++ SparkShimLoader.getSparkShims.expressionMappings

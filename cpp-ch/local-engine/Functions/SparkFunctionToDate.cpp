@@ -17,8 +17,13 @@
 #include <Common/LocalDate.h>
 #include <Common/DateLUT.h>
 #include <Common/DateLUTImpl.h>
+#include <Columns/ColumnString.h>
+#include <Columns/ColumnVector.h>
+#include <Columns/ColumnsNumber.h>
+#include <Columns/ColumnNullable.h>
+#include <DataTypes/IDataType.h>
 #include <DataTypes/DataTypeDate32.h>
-#include <Functions/FunctionsConversion.h>
+#include <DataTypes/DataTypeNullable.h>
 #include <Functions/FunctionFactory.h>
 #include <IO/ReadBufferFromMemory.h>
 #include <IO/ReadHelpers.h>
@@ -35,16 +40,20 @@ namespace ErrorCodes
 
 namespace local_engine
 {
-class SparkFunctionConvertToDate : public DB::FunctionToDate32OrNull
+class SparkFunctionConvertToDate : public DB::IFunction
 {
 public:
     static constexpr auto name = "sparkToDate";
     static DB::FunctionPtr create(DB::ContextPtr) { return std::make_shared<SparkFunctionConvertToDate>(); }
     SparkFunctionConvertToDate() = default;
     ~SparkFunctionConvertToDate() override = default;
+    bool isSuitableForShortCircuitArgumentsExecution(const DB::DataTypesWithConstInfo &) const override { return true; }
+    size_t getNumberOfArguments() const override { return 0; }
     String getName() const override { return name; }
+    bool isVariadic() const override { return true; }
+    bool useDefaultImplementationForConstants() const override { return true; }
 
-    bool checkAndGetDate32(DB::ReadBuffer & buf, DB::DataTypeDate32::FieldType &x, const DateLUTImpl & date_lut) const
+    bool checkAndGetDate32(DB::ReadBuffer & buf, DB::DataTypeDate32::FieldType &x, const DateLUTImpl & date_lut, UInt8 & can_be_parsed) const
     {
         auto checkNumbericASCII = [&](DB::ReadBuffer & rb, size_t start, size_t length) -> bool
         {
@@ -64,12 +73,16 @@ public:
             else
                 return true;
         };
-        if (!checkNumbericASCII(buf, 0, 4) 
-            || !checkDelimiter(buf, 4) 
+        bool yearIsNumberic = checkNumbericASCII(buf, 0, 4);
+        if (!yearIsNumberic
+            || !checkDelimiter(buf, 4)
             || !checkNumbericASCII(buf, 5, 2)
             || !checkDelimiter(buf, 7) 
             || !checkNumbericASCII(buf, 8, 2))
+        {
+            can_be_parsed = yearIsNumberic;
             return false;
+        }
         else
         {
             UInt8 month = (*(buf.position() + 5) - '0') * 10 + (*(buf.position() + 6) - '0');
@@ -97,6 +110,12 @@ public:
                 }
             }
         }
+    }
+
+    DB::DataTypePtr getReturnTypeImpl(const DB::ColumnsWithTypeAndName &) const override
+    {
+        DB::DataTypePtr date32_type = std::make_shared<DB::DataTypeDate32>();
+        return makeNullable(date32_type);
     }
 
     DB::ColumnPtr executeImpl(const DB::ColumnsWithTypeAndName & arguments, const DB::DataTypePtr & result_type, size_t) const override
@@ -142,12 +161,18 @@ public:
                     null_container[i] = true;
                     continue;
                 }
-                if (!checkAndGetDate32(buf, result_container[i], *local_time_zone))
+                UInt8 can_be_parsed = 1;
+                if (!checkAndGetDate32(buf, result_container[i], *local_time_zone, can_be_parsed))
                 {
-                    time_t tmp = 0;
-                    bool parsed = tryParseDateTimeBestEffort(tmp, buf, *local_time_zone, *utc_time_zone);
-                    result_container[i] = local_time_zone->toDayNum<time_t>(tmp);
-                    null_container[i] = !parsed;
+                    if (!can_be_parsed)
+                        null_container[i] = true;
+                    else
+                    {
+                        time_t tmp = 0;
+                        bool parsed = tryParseDateTimeBestEffort(tmp, buf, *local_time_zone, *utc_time_zone);
+                        result_container[i] = local_time_zone->toDayNum<time_t>(tmp);
+                        null_container[i] = !parsed;
+                    }
                 }
             }
         }

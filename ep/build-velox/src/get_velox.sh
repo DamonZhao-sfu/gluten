@@ -17,7 +17,7 @@
 set -exu
 
 VELOX_REPO=https://github.com/oap-project/velox.git
-VELOX_BRANCH=2024_03_15
+VELOX_BRANCH=2024_03_25
 VELOX_HOME=""
 
 #Set on run gluten on HDFS
@@ -83,6 +83,8 @@ function process_setup_ubuntu {
 
   # No need to re-install git.
   sed -i '/git \\/d' scripts/setup-ubuntu.sh
+  # need set BUILD_SHARED_LIBS flag for thrift
+  sed -i  "/facebook\/fbthrift/{n;s/cmake_install -DBUILD_TESTS=OFF/cmake_install -DBUILD_TESTS=OFF -DBUILD_SHARED_LIBS=OFF/;}" scripts/setup-ubuntu.sh
   # Do not install libunwind which can cause interruption when catching native exception.
   sed -i 's/sudo --preserve-env apt install -y libunwind-dev && //' scripts/setup-ubuntu.sh
   sed -i '/ccache/a\  *thrift* \\' scripts/setup-ubuntu.sh
@@ -92,11 +94,10 @@ function process_setup_ubuntu {
   sed -i '/ccache /a\  libgsasl7-dev \\' scripts/setup-ubuntu.sh
   sed -i '/ccache/a\  libuuid1 \\' scripts/setup-ubuntu.sh
   sed -i '/ccache/a\  uuid-dev \\' scripts/setup-ubuntu.sh
+  sed -i '/ccache/a\  curl \\' scripts/setup-ubuntu.sh
   sed -i '/libre2-dev/d' scripts/setup-ubuntu.sh
   sed -i '/libgmock-dev/d' scripts/setup-ubuntu.sh # resolved by ep/build-velox/build/velox_ep/CMake/resolve_dependency_modules/gtest.cmake
-  # To allow installing boost into /usr/local.
-  sed -i 's/.\/b2 "-j$(nproc)" -d0 install threading=multi/sudo .\/b2 "-j$(nproc)" -d0 install threading=multi/' scripts/setup-ubuntu.sh
-
+  sed -i 's/github_checkout boostorg\/boost \"\${BOOST_VERSION}\" --recursive/wget_and_untar https:\/\/github.com\/boostorg\/boost\/releases\/download\/boost-1.84.0\/boost-1.84.0.tar.gz boost \&\& cd boost/g' scripts/setup-ubuntu.sh
   if [ $ENABLE_HDFS == "ON" ]; then
     sed -i '/^function install_folly.*/i function install_libhdfs3 {\n  github_checkout oap-project/libhdfs3 master \n cmake_install\n}\n' scripts/setup-ubuntu.sh
     sed -i '/^  run_and_time install_folly/a \ \ run_and_time install_libhdfs3' scripts/setup-ubuntu.sh
@@ -129,14 +130,12 @@ function process_setup_centos8 {
   fi
   # make this function Reentrant
   git checkout scripts/setup-centos8.sh
+  # need set BUILD_SHARED_LIBS flag for thrift
+  sed -i "/cd fbthrift/{n;s/cmake_install -Denable_tests=OFF/cmake_install -Denable_tests=OFF -DBUILD_SHARED_LIBS=OFF/;}" scripts/setup-centos8.sh
   # No need to re-install git.
   sed -i 's/dnf_install ninja-build cmake curl ccache gcc-toolset-9 git/dnf_install ninja-build cmake curl ccache gcc-toolset-9/' scripts/setup-centos8.sh
   sed -i '/^function dnf_install/i\DEPENDENCY_DIR=${DEPENDENCY_DIR:-$(pwd)}' scripts/setup-centos8.sh
   sed -i '/^dnf_install autoconf/a\dnf_install libxml2-devel libgsasl-devel libuuid-devel' scripts/setup-centos8.sh
-  sed -i '/^function install_gflags.*/i function install_openssl {\n  wget_and_untar https://github.com/openssl/openssl/archive/refs/tags/OpenSSL_1_1_1s.tar.gz openssl \n cd openssl \n ./config no-shared && make depend && make && sudo make install \n cd ..\n}\n'     scripts/setup-centos8.sh
-  sed -i '/^  run_and_time install_fbthrift/a \  run_and_time install_openssl' scripts/setup-centos8.sh
-  # To allow installing boost into /usr/local.
-  sed -i 's/.\/b2 "-j$(nproc)" -d0 install threading=multi/sudo .\/b2 "-j$(nproc)" -d0 install threading=multi/' scripts/setup-centos8.sh
 
   if [ $ENABLE_HDFS == "ON" ]; then
     sed -i '/^function install_gflags.*/i function install_libhdfs3 {\n cd "\${DEPENDENCY_DIR}"\n github_checkout oap-project/libhdfs3 master\n cd ..\n cmake_install libhdfs3\n}\n' scripts/setup-centos8.sh
@@ -318,6 +317,8 @@ function setup_macos {
   fi
 
   sed -i '' $'/^  run_and_time install_double_conversion/a\\\n  run_and_time install_folly\\\n' scripts/setup-macos.sh
+  # need set BUILD_SHARED_LIBS flag for thrift
+  sed -i '' "/facebook\/fbthrift/{n;s/cmake_install -DBUILD_TESTS=OFF/cmake_install -DBUILD_TESTS=OFF -DBUILD_SHARED_LIBS=OFF/;}" scripts/setup-macos.sh
 }
 
 if [ $OS == 'Linux' ]; then

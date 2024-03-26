@@ -113,9 +113,11 @@ object ExpressionNames {
   final val DECODE = "decode"
   final val ENCODE = "encode"
   final val UUID = "uuid"
+  final val BIT_LENGTH = "bit_length"
 
   // URL functions
   final val PARSE_URL = "parse_url"
+  final val URL_DECODE = "url_decode"
 
   // SparkSQL Math functions
   final val ABS = "abs"
@@ -184,10 +186,12 @@ object ExpressionNames {
   final val TRUNC = "trunc"
   final val DATE_TRUNC = "date_trunc"
   final val GET_TIMESTAMP = "get_timestamp" // for function: to_date/to_timestamp
+  final val TIMESTAMP_ADD = "timestamp_add"
   final val NEXT_DAY = "next_day"
   final val LAST_DAY = "last_day"
   final val MONTHS_BETWEEN = "months_between"
   final val DATE_FROM_UNIX_DATE = "date_from_unix_date"
+  final val MAKE_TIMESTAMP = "make_timestamp"
 
   // JSON functions
   final val GET_JSON_OBJECT = "get_json_object"
@@ -262,6 +266,8 @@ object ExpressionNames {
   final val CHECK_OVERFLOW = "check_overflow"
   final val MAKE_DECIMAL = "make_decimal"
   final val PROMOTE_PRECISION = "promote_precision"
+  final val SPARK_PARTITION_ID = "spark_partition_id"
+  final val MONOTONICALLY_INCREASING_ID = "monotonically_increasing_id"
 
   // Directly use child expression transformer
   final val KNOWN_FLOATING_POINT_NORMALIZED = "known_floating_point_normalized"

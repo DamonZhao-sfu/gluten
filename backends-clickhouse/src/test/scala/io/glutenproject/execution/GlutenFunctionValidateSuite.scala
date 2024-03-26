@@ -60,7 +60,7 @@ class GlutenFunctionValidateSuite extends GlutenClickHouseWholeStageTransformerS
       .set("spark.databricks.delta.stalenessLimit", "3600000")
       .set("spark.gluten.sql.columnar.columnartorow", "true")
       .set("spark.gluten.sql.columnar.backend.ch.worker.id", "1")
-      .set(GlutenConfig.GLUTEN_LIB_PATH, UTSystemParameters.getClickHouseLibPath())
+      .set(GlutenConfig.GLUTEN_LIB_PATH, UTSystemParameters.clickHouseLibPath)
       .set("spark.gluten.sql.columnar.iterator", "true")
       .set("spark.gluten.sql.columnar.hashagg.enablefinal", "true")
       .set("spark.gluten.sql.enable.native.validation", "false")
@@ -633,4 +633,31 @@ class GlutenFunctionValidateSuite extends GlutenClickHouseWholeStageTransformerS
       """.stripMargin
     runQueryAndCompare(sql)(checkOperatorMatch[ProjectExecTransformer])
   }
+
+  test("test parse string with blank to integer") {
+    // issue https://github.com/apache/incubator-gluten/issues/4956
+    val sql = "select  cast(concat(' ', cast(id as string)) as bigint) from range(10)"
+    runQueryAndCompare(sql)(checkOperatorMatch[ProjectExecTransformer])
+  }
+
+  test("avg(bigint) overflow") {
+    withSQLConf(
+      "spark.gluten.sql.columnar.forceShuffledHashJoin" -> "false",
+      "spark.sql.autoBroadcastJoinThreshold" -> "-1") {
+      withTable("myitem") {
+        sql("create table big_int(id bigint) using parquet")
+        sql("""
+              |insert into big_int values (9223372036854775807),
+              |(9223372036854775807),
+              |(9223372036854775807),
+              |(9223372036854775807)
+              |""".stripMargin)
+        val q = "select avg(id) from big_int"
+        runQueryAndCompare(q)(checkOperatorMatch[CHHashAggregateExecTransformer])
+        val disinctSQL = "select count(distinct id), avg(distinct id), avg(id) from big_int"
+        runQueryAndCompare(disinctSQL)(checkOperatorMatch[CHHashAggregateExecTransformer])
+      }
+    }
+  }
+
 }
