@@ -38,6 +38,13 @@ COMPILE_ARROW_JAVA=OFF
 NUM_THREADS=""
 OTHER_ARGUMENTS=""
 
+export CXX=$(conda info --root)/envs/velox-build/bin/x86_64-conda-linux-gnu-g++
+export CC=$(conda info --root)/envs/velox-build/bin/x86_64-conda-linux-gnu-gcc
+export LD_LIBRARY_PATH=$(conda info --root)/envs/velox-build/lib:$LD_LIBRARY_PATH
+export CPATH=$(conda info --root)/envs/velox-build/include
+export CXXFLAGS="-DFOLLY_HAVE_SO_TIMESTAMPING=0"
+
+
 OS=`uname -s`
 ARCH=`uname -m`
 
@@ -103,16 +110,6 @@ for arg in "$@"; do
 done
 
 function compile {
-  if [ -z "${GLUTEN_VCPKG_ENABLED:-}" ] && [ $RUN_SETUP_SCRIPT == "ON" ]; then
-    if [ $OS == 'Linux' ]; then
-      setup_linux
-    elif [ $OS == 'Darwin' ]; then
-      setup_macos
-    else
-      echo "Unsupported kernel: $OS"
-      exit 1
-    fi
-  fi
 
   COMPILE_OPTION="-DVELOX_ENABLE_PARQUET=ON -DVELOX_BUILD_TESTING=OFF"
   if [ $BUILD_TEST_UTILS == "ON" ]; then
@@ -166,7 +163,7 @@ function compile {
     if [ -d xsimd-build ]; then
       echo "INSTALL xsimd."
       if [ $OS == 'Linux' ]; then
-        sudo cmake --install xsimd-build/
+        cmake --install xsimd-build/ --prefix /localhdd/hza215/conda/envs/velox-build/
       elif [ $OS == 'Darwin' ]; then
         sudo cmake --install xsimd-build/
       fi
@@ -174,7 +171,7 @@ function compile {
     if [ -d gtest-build ]; then
       echo "INSTALL gtest."
       if [ $OS == 'Linux' ]; then
-        sudo cmake --install gtest-build/
+        cmake --install gtest-build/ --prefix /localhdd/hza215/conda/envs/velox-build/
       elif [ $OS == 'Darwin' ]; then
         sudo cmake --install gtest-build/
       fi

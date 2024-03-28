@@ -82,9 +82,16 @@ else ()
   message(STATUS "Add definition NDEBUG")
 endif()
 
+add_compile_options(-Wno-overloaded-virtual)
+add_compile_options(-Wno-attributes)
+add_compile_options(-Wno-stringop-overflow)
+add_compile_options(-Wno-array-bounds)
+
+
 add_compile_options(-Wall)
 add_compile_options(-Wno-sign-compare)
 add_compile_options(-Wno-comment)
+
 
 add_compile_options(-Werror)
 add_compile_options(-Wno-error=parentheses)

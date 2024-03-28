@@ -22,7 +22,7 @@ BUILD_TESTS=OFF
 BUILD_EXAMPLES=OFF
 BUILD_BENCHMARKS=OFF
 BUILD_JEMALLOC=OFF
-BUILD_PROTOBUF=OFF
+BUILD_PROTOBUF=ON
 ENABLE_QAT=OFF
 ENABLE_HBM=OFF
 ENABLE_GCS=OFF
@@ -102,6 +102,11 @@ CURRENT_DIR=$(
   pwd
 )
 
+export CXX=$(conda info --root)/envs/velox-build/bin/x86_64-conda-linux-gnu-g++
+export CC=$(conda info --root)/envs/velox-build/bin/x86_64-conda-linux-gnu-gcc
+export LD_LIBRARY_PATH=$(conda info --root)/envs/velox-build/lib:$LD_LIBRARY_PATH
+export CPATH=$(conda info --root)/envs/velox-build/include
+
 #gluten cpp will find velox lib from VELOX_HOME
 if [ "$VELOX_HOME" == "" ]; then
   VELOX_HOME="$CURRENT_DIR/../ep/build-velox/build/velox_ep"
@@ -128,7 +133,7 @@ if [ -d build ]; then
 fi
 mkdir build
 cd build
-cmake .. \
+/localhdd/hza215/bin/bin/cmake .. \
   -DBUILD_TESTS=${BUILD_TESTS} \
   -DBUILD_EXAMPLES=${BUILD_EXAMPLES} \
   -DBUILD_JEMALLOC=${BUILD_JEMALLOC} \
