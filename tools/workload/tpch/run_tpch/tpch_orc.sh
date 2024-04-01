@@ -12,23 +12,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-batchsize=1024
+#please choose right os system jar
+GLUTEN_JAR=/localhdd/hza215/gluten/backends-velox/target/backends-velox-1.2.0-SNAPSHOT-3.2.jar
 SPARK_HOME=/localhdd/hza215/spark/spark-3.2.1-bin-hadoop3.2/
-spark_sql_perf_jar=/localhdd/hza215/gluten/spark-sql-perf/target/scala-2.12/spark-sql-perf_2.12-0.5.1-SNAPSHOT.jar
-cat tpch_datagen_parquet.scala | ${SPARK_HOME}/bin/spark-shell \
-  --num-executors 14 \
-  --name tpch_gen_parquet \
-  --executor-memory 25g \
-  --executor-cores 8 \
-  --driver-memory 8g \
-  --deploy-mode client \
-  --conf spark.executor.memoryOverhead=1g \
-  --conf spark.sql.parquet.columnarReaderBatchSize=${batchsize} \
-  --conf spark.sql.inMemoryColumnarStorage.batchSize=${batchsize} \
-  --conf spark.sql.execution.arrow.maxRecordsPerBatch=${batchsize} \
-  --conf spark.sql.broadcastTimeout=4800 \
-  --conf spark.driver.maxResultSize=4g \
-  --conf spark.sql.sources.useV1SourceList=avro \
-  --conf spark.sql.shuffle.partitions=224 \
-  --jars ${spark_sql_perf_jar}
+cat tpch_orc.scala | ${SPARK_HOME}/bin/spark-shell \
+  --master yarn --deploy-mode client \
+  --conf spark.plugins=io.glutenproject.GlutenPlugin \
+  --conf spark.driver.extraClassPath=${GLUTEN_JAR} \
+  --conf spark.executor.extraClassPath=${GLUTEN_JAR} \
+  --conf spark.memory.offHeap.enabled=true \
+  --conf spark.memory.offHeap.size=2g \
+  --conf spark.gluten.sql.columnar.forceShuffledHashJoin=true \
+  --conf spark.shuffle.manager=org.apache.spark.shuffle.sort.ColumnarShuffleManager \
+  --num-executors 3 \
+  --executor-cores 3 \
+  --driver-memory 2g \
+  --executor-memory 2g \
+  --conf spark.executor.memoryOverhead=2g \
+  --conf spark.driver.maxResultSize=2g

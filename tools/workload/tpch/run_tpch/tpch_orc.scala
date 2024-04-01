@@ -21,7 +21,7 @@ import java.util.Arrays
 import sys.process._
 
 //Configurations:
-var parquet_file_path = "/localhdd/hza215/tpch-parquet"
+var orc_file_path = "/localhdd/hza215/spark_benchmark/tpch/orc"
 var gluten_root = "/localhdd/hza215/gluten"
 
 def time[R](block: => R): R = {
@@ -33,14 +33,14 @@ def time[R](block: => R): R = {
 }
 
 //Read TPC-H Table from DWRF files
-val lineitem = spark.read.format("parquet").load("file://" + parquet_file_path + "/lineitem")
-val part = spark.read.format("parquet").load("file://" + parquet_file_path + "/part")
-val orders = spark.read.format("parquet").load("file://" + parquet_file_path + "/orders")
-val customer = spark.read.format("parquet").load("file://" + parquet_file_path + "/customer")
-val supplier = spark.read.format("parquet").load("file://" + parquet_file_path + "/supplier")
-val partsupp = spark.read.format("parquet").load("file://" + parquet_file_path + "/partsupp")
-val region = spark.read.format("parquet").load("file://" + parquet_file_path + "/region")
-val nation = spark.read.format("parquet").load("file://" + parquet_file_path + "/nation")
+val lineitem = spark.read.format("orc").load("file://" + orc_file_path + "/lineitem")
+val part = spark.read.format("orc").load("file://" + orc_file_path + "/part")
+val orders = spark.read.format("orc").load("file://" + orc_file_path + "/orders")
+val customer = spark.read.format("orc").load("file://" + orc_file_path + "/customer")
+val supplier = spark.read.format("orc").load("file://" + orc_file_path + "/supplier")
+val partsupp = spark.read.format("orc").load("file://" + orc_file_path + "/partsupp")
+val region = spark.read.format("orc").load("file://" + orc_file_path + "/region")
+val nation = spark.read.format("orc").load("file://" + orc_file_path + "/nation")
 
 //Create DWRF based TPC-H Table View
 lineitem.createOrReplaceTempView("lineitem")
@@ -76,7 +76,7 @@ val sorted = fileLists.sortBy {
      }}
 
 // Main program to run TPC-H testing
-/*for (t <- sorted) {
+for (t <- sorted) {
   println(t)
   val fileContents = Source.fromFile(t).getLines.filter(!_.startsWith("--")).mkString(" ")
   println(fileContents)
@@ -87,4 +87,4 @@ val sorted = fileLists.sortBy {
   } catch {
     case e: Exception => None
   }
-}*/
+}

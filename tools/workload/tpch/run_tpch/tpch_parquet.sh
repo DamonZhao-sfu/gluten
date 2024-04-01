@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #please choose right os system jar
-GLUTEN_JAR=/PATH_TO_GLUTEN_HOME/package/target/<gluten-jar>
-SPARK_HOME=/PATH_TO_SPARK_HOME/
+GLUTEN_JAR=/localhdd/hza215/gluten/backends-velox/target/backends-velox-1.2.0-SNAPSHOT-3.2.jar
+SPARK_HOME=/localhdd/hza215/spark/spark-3.2.1-bin-hadoop3.2/
 cat tpch_parquet.scala | ${SPARK_HOME}/bin/spark-shell \
   --master yarn --deploy-mode client \
   --conf spark.plugins=io.glutenproject.GlutenPlugin \
