@@ -1,0 +1,3 @@
+[submodule "SQL2FPGA"]
+	path = SQL2FPGA
+	url = https://github.com/DamonZhao-sfu/SQL2FPGA.git
