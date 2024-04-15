@@ -591,15 +591,17 @@ class SparkPlanExecApiImpl extends SparkPlanExecApi {
    *
    * @return
    */
-  override def genExtendedAnalyzers(): List[SparkSession => Rule[LogicalPlan]] = List()
+  override def genExtendedAnalyzers(): List[SparkSession => Rule[LogicalPlan]]
+  = List()
 
   /**
    * Generate extended Optimizer. Currently only for Velox backend.
    *
    * @return
    */
-  override def genExtendedOptimizers(): List[SparkSession => Rule[LogicalPlan]] =
+  override def genExtendedOptimizers(): List[SparkSession => Rule[LogicalPlan]] = {
     List(AggregateFunctionRewriteRule)
+  }
 
   /**
    * Generate extended columnar pre-rules, in the validation phase.

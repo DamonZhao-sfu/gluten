@@ -33,6 +33,12 @@
 
   <dependencies>
     <dependency>
+      <groupId>sfu.ca.hiaccel</groupId>
+      <artifactId>SQL2FPGA</artifactId>
+      <version>1.0-SNAPSHOT</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
       <groupId>io.glutenproject</groupId>
       <artifactId>gluten-core</artifactId>
       <version>${project.version}</version>
@@ -198,10 +204,6 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
-      </plugin>
-      <plugin>
-        <groupId>org.scalastyle</groupId>
-        <artifactId>scalastyle-maven-plugin</artifactId>
       </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>

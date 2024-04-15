@@ -33,6 +33,7 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.softaffinity.SoftAffinity
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, SortOrder}
+
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.datasources.FilePartition
@@ -40,6 +41,7 @@ import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 import com.google.common.collect.Lists
+import sfu.ca.hiaccel.{SQL2FPGA_Codegen, SQL2FPGA_QConfig, SQL2FPGA_QParser, SQL2FPGA_QPlan, SQL2FPGAContext}
 
 import scala.collection.mutable
 
@@ -48,7 +50,49 @@ case class TransformContext(
     outputAttributes: Seq[Attribute],
     root: RelNode)
 
+case class SQL2FPGATransformContext(
+    inputAttributes: Seq[Attribute],
+    outputAttributes: Seq[Attribute],
+    root: SQL2FPGA_QPlan)
+
 case class WholeStageTransformContext(root: PlanNode, substraitContext: SubstraitContext = null)
+
+case class SQL2FPGAWholeStageTransformContext(
+    root: SQL2FPGA_QPlan,
+    sql2FPGAContext: SQL2FPGAContext = null)
+
+trait SQL2FPGATransformSupport extends GlutenPlan {
+  final override def doExecute(): RDD[InternalRow] = {
+    throw new UnsupportedOperationException(
+      s"${this.getClass.getSimpleName} doesn't support doExecute")
+  }
+
+  final override lazy val supportsColumnar: Boolean = true
+
+  /**
+   * Returns all the RDDs of ColumnarBatch which generates the input rows.
+   *
+   * @note
+   *   Right now we support up to two RDDs
+   */
+  def columnarInputRDDs: Seq[RDD[ColumnarBatch]]
+
+  def doTransform(context: SQL2FPGAContext): TransformContext = {
+    throw new UnsupportedOperationException(
+      s"This operator doesn't support doTransform with SQL2FPGAContext.")
+  }
+
+  def metricsUpdater(): MetricsUpdater
+
+  protected def getColumnarInputRDDs(plan: SparkPlan): Seq[RDD[ColumnarBatch]] = {
+    plan match {
+      case c: SQL2FPGATransformSupport =>
+        c.columnarInputRDDs
+      case _ =>
+        Seq(plan.executeColumnar())
+    }
+  }
+}
 
 trait TransformSupport extends GlutenPlan {
 
@@ -70,6 +114,11 @@ trait TransformSupport extends GlutenPlan {
   def doTransform(context: SubstraitContext): TransformContext = {
     throw new UnsupportedOperationException(
       s"This operator doesn't support doTransform with SubstraitContext.")
+  }
+
+  def doTransform(context: SQL2FPGAContext): SQL2FPGATransformContext = {
+    throw new UnsupportedOperationException(
+      s"This operator doesn't support doTransform with SQL2FPGAContext.")
   }
 
   def metricsUpdater(): MetricsUpdater
@@ -99,7 +148,6 @@ case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = f
 ) extends GenerateTreeStringShim
   with UnaryTransformSupport {
   assert(child.isInstanceOf[TransformSupport])
-
   def stageId: Int = transformStageId
 
   def wholeStageTransformerContextDefined: Boolean = wholeStageTransformerContext.isDefined
@@ -109,13 +157,21 @@ case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = f
   // Note: "metrics" is made transient to avoid sending driver-side metrics to tasks.
   @transient override lazy val metrics: Map[String, SQLMetric] =
     BackendsApiManager.getMetricsApiInstance.genWholeStageTransformerMetrics(sparkContext)
-
+  @transient val codegen = new SQL2FPGA_Codegen
+  @transient val qParser = new SQL2FPGA_QParser
+  @transient val qConfig = new SQL2FPGA_QConfig
+  qConfig.pure_sw_mode = 0
+  qConfig.scale_factor = 1
   val sparkConf: SparkConf = sparkContext.getConf
   val numaBindingInfo: GlutenNumaBindingInfo = GlutenConfig.getConf.numaBindingInfo
   val substraitPlanLogLevel: String = GlutenConfig.getConf.substraitPlanLogLevel
 
   @transient
   private var wholeStageTransformerContext: Option[WholeStageTransformContext] = None
+
+  @transient
+  private var wholeStageTransformerSQL2FPGAContext: Option[SQL2FPGAWholeStageTransformContext] =
+    None
 
   private var outputSchemaForPlan: Option[TypeNode] = None
 
@@ -135,6 +191,14 @@ case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = f
 
     // Fixes issue-1874
     outputSchemaForPlan = Some(inferSchemaFromAttributes(expectOutput))
+  }
+
+  def generateSQL2FPGAPlan: SQL2FPGA_QPlan = {
+    if (wholeStageTransformerSQL2FPGAContext.isDefined) {
+      wholeStageTransformerSQL2FPGAContext.get.root
+    } else {
+      generateWholeStageTransformSQL2FPGAContext().root
+    }
   }
 
   def substraitPlan: PlanNode = {
@@ -175,6 +239,25 @@ case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = f
       ""
     }
     super.verboseStringWithOperatorId() ++ nativePlan
+  }
+
+  private def generateWholeStageTransformSQL2FPGAContext(): SQL2FPGAWholeStageTransformContext = {
+    val sql2FPGAContext = new SQL2FPGAContext
+    val childCtx = child
+      .asInstanceOf[TransformSupport]
+      .doTransform(sql2FPGAContext)
+    if (childCtx == null) {
+      throw new NullPointerException(s"WholeStageTransformer can't do Transform on $child")
+    }
+
+    val outNames = new java.util.ArrayList[String]()
+    for (attr <- childCtx.outputAttributes) {
+      outNames.add(ConverterUtils.genColumnNameWithExprId(attr))
+    }
+
+    qParser.parse_SparkQPlan_to_SQL2FPGAQPlan(child.logicalLink.get, qConfig)
+    val planNode = qParser.qPlan
+    SQL2FPGAWholeStageTransformContext(planNode, sql2FPGAContext)
   }
 
   private def generateWholeStageTransformContext(): WholeStageTransformContext = {
@@ -224,6 +307,16 @@ case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = f
     context
   }
 
+  def doSQL2FPGAWholeStageTransform(): SQL2FPGAWholeStageTransformContext = {
+    // invoke SparkPlan.prepare to do subquery preparation etc.
+    super.prepare()
+    val context = generateWholeStageTransformSQL2FPGAContext()
+    if (conf.getConf(GlutenConfig.CACHE_WHOLE_STAGE_TRANSFORMER_CONTEXT)) {
+      wholeStageTransformerSQL2FPGAContext = Some(context)
+    }
+    context
+  }
+
   /** Find all BasicScanExecTransformer in one WholeStageTransformer */
   private def findAllScanTransformers(): Seq[BasicScanExecTransformer] = {
     val basicScanExecTransformers = new mutable.ListBuffer[BasicScanExecTransformer]()
@@ -268,7 +361,6 @@ case class WholeStageTransformer(child: SparkPlan, materializeInput: Boolean = f
        * rather than genFinalStageIterator will be invoked
        */
       val allScanSplitInfos = getSplitInfosFromScanTransformer(basicScanExecTransformers)
-
       val (wsCtx, inputPartitions) = GlutenTimeMetric.withMillisTime {
         val wsCtx = doWholeStageTransform()
         val partitions =

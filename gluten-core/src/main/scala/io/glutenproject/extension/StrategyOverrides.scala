@@ -27,16 +27,69 @@ import org.apache.spark.sql.catalyst.SQLConfHelper
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight, JoinSelectionHelper}
 import org.apache.spark.sql.catalyst.plans._
+
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.execution.{joins, JoinSelectionShim, SparkPlan}
 import org.apache.spark.sql.execution.adaptive.{BroadcastQueryStageExec, LogicalQueryStage}
 import org.apache.spark.sql.execution.joins.BroadcastHashJoinExec
 
+import sfu.ca.hiaccel.{SQL2FPGA_Codegen, SQL2FPGA_QConfig, SQL2FPGA_QParser}
+
 object StrategyOverrides extends GlutenSparkExtensionsInjector {
   override def inject(extensions: SparkSessionExtensions): Unit = {
     extensions.injectPlannerStrategy(JoinSelectionOverrides)
+    extensions.injectPlannerStrategy(SQL2FPGAOverrides)
   }
 }
+
+case class SQL2FPGAOverrides(session: SparkSession) extends Strategy {
+  @transient val codegen = new SQL2FPGA_Codegen
+  @transient val qParser = new SQL2FPGA_QParser
+  @transient val qConfig = new SQL2FPGA_QConfig
+  qConfig.pure_sw_mode = 0
+  qConfig.scale_factor = 1
+  qConfig.format = "orc"
+  override def apply(plan: LogicalPlan): Seq[SparkPlan] = {
+    // Ignore forceShuffledHashJoin if exist multi continuous joins
+    if (GlutenConfig.getConf.offloadToFPGA) {
+      plan.transform {
+        case ReturnAnswer(child) =>
+          val finalPlan = child match {
+            case GlobalLimit(_, _) =>
+              child.children.headOption match {
+                case Some(LocalLimit(_, _)) =>
+                  child.children.headOption.flatMap(_.children.headOption) match {
+                    case Some(_: Project) => child.children.head.children.head.children.head
+                    case _ => child
+                  }
+                case _ => child
+              }
+            case _ => child
+          }
+          print("final plan" + finalPlan)
+          qParser.parse_SparkQPlan_to_SQL2FPGAQPlan(finalPlan, qConfig)
+          qParser.qPlan.allocateOperators(0, 0)
+          qParser.qPlan.genCode(null, qConfig)
+          codegen.genHostCode(
+            qParser.qPlan,
+            qConfig.pure_sw_mode,
+            qConfig.num_fpga_device,
+            0,
+            qConfig.scale_factor,
+            0,
+            0,
+            1)
+          codegen.genFPGAConfigCode(qParser.qPlan, 0, qConfig.scale_factor)
+          codegen.genSWConfigCode(qParser.qPlan, 0, qConfig.scale_factor)
+          plan
+      }
+      Nil
+    } else {
+      Nil
+    }
+  }
+}
+
 
 case class JoinSelectionOverrides(session: SparkSession)
   extends Strategy
