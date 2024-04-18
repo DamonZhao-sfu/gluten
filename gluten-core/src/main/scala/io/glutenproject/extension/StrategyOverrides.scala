@@ -21,19 +21,20 @@ import io.glutenproject.backendsapi.BackendsApiManager
 import io.glutenproject.extension.columnar.TRANSFORM_UNSUPPORTED
 import io.glutenproject.extension.columnar.TransformHints.TAG
 import io.glutenproject.utils.LogicalPlanSelector
+import io.glutenproject.vectorized.JniLibLoader
 
 import org.apache.spark.sql.{SparkSession, SparkSessionExtensions, Strategy}
 import org.apache.spark.sql.catalyst.SQLConfHelper
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.optimizer.{BuildLeft, BuildRight, JoinSelectionHelper}
 import org.apache.spark.sql.catalyst.plans._
-
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.execution.{joins, JoinSelectionShim, SparkPlan}
 import org.apache.spark.sql.execution.adaptive.{BroadcastQueryStageExec, LogicalQueryStage}
 import org.apache.spark.sql.execution.joins.BroadcastHashJoinExec
 
-import sfu.ca.hiaccel.{SQL2FPGA_Codegen, SQL2FPGA_QConfig, SQL2FPGA_QParser}
+import sfu.ca.hiaccel.{SQL2FPGA_Codegen, SQL2FPGA_QConfig, SQL2FPGA_QParser, SQL2FPGA_Linker, JNIWrapper}
+
 
 object StrategyOverrides extends GlutenSparkExtensionsInjector {
   override def inject(extensions: SparkSessionExtensions): Unit = {
@@ -46,14 +47,17 @@ case class SQL2FPGAOverrides(session: SparkSession) extends Strategy {
   @transient val codegen = new SQL2FPGA_Codegen
   @transient val qParser = new SQL2FPGA_QParser
   @transient val qConfig = new SQL2FPGA_QConfig
+  @transient val linker = new SQL2FPGA_Linker
   qConfig.pure_sw_mode = 0
   qConfig.scale_factor = 1
   qConfig.format = "orc"
+  qConfig.basePath = "/localhdd/hza215/Vitis_Libraries/database/L2/demos/obj_FPGA_1_xilinx_u280_xdma_201920_3"
+
   override def apply(plan: LogicalPlan): Seq[SparkPlan] = {
-    // Ignore forceShuffledHashJoin if exist multi continuous joins
     if (GlutenConfig.getConf.offloadToFPGA) {
-      plan.transform {
-        case ReturnAnswer(child) =>
+      plan match {
+        case ReturnAnswer(child) => {
+          println("originalPlan" + child)
           val finalPlan = child match {
             case GlobalLimit(_, _) =>
               child.children.headOption match {
@@ -66,27 +70,39 @@ case class SQL2FPGAOverrides(session: SparkSession) extends Strategy {
               }
             case _ => child
           }
-          print("final plan" + finalPlan)
+          println("finalPlan" + finalPlan)
           qParser.parse_SparkQPlan_to_SQL2FPGAQPlan(finalPlan, qConfig)
           qParser.qPlan.allocateOperators(0, 0)
           qParser.qPlan.genCode(null, qConfig)
+          var queryNo = 0
           codegen.genHostCode(
             qParser.qPlan,
             qConfig.pure_sw_mode,
             qConfig.num_fpga_device,
-            0,
+            queryNo,
             qConfig.scale_factor,
             0,
             0,
-            1)
-          codegen.genFPGAConfigCode(qParser.qPlan, 0, qConfig.scale_factor)
-          codegen.genSWConfigCode(qParser.qPlan, 0, qConfig.scale_factor)
-          plan
+            1, qConfig.basePath)
+          codegen.genFPGAConfigCode(qParser.qPlan, 0, qConfig.scale_factor, qConfig.basePath)
+          codegen.genSWConfigCode(qParser.qPlan, 0, qConfig.scale_factor, qConfig.basePath)
+          val libPath = GlutenConfig.getConf.sql2fpgaLibPath
+          linker.compileCppToSharedLibrary(queryNo, qConfig, libPath)
+          JniLibLoader.loadFromPath(libPath, false)
+          val wrapper = new JNIWrapper
+          wrapper.runQuery(Array("-xclbin", "/localhdd/hza215/Vitis_Libraries/database/L2/demos/build_join_partition/xclbin_xilinx_u280_xdma_201920_3_hw/gqe_join.xclbin",
+          "-xclbin_a", "/localhdd/hza215/Vitis_Libraries/database/L2/demos/build_aggr_partition/xclbin_xilinx_u280_xdma_201920_3_hw/gqe_aggr.xclbin",
+          "-xclbin_h", "/localhdd/hza215/Vitis_Libraries/database/L2/demos/build_join_partition/xclbin_xilinx_u280_xdma_201920_3_hw/gqe_join.xclbin",
+          "-in", "/localhdd/hza215/spark_benchmark/tpcds/orc",
+          "-c", "1",
+          "-p","16"))
+        }
+        case _ => {
+          
+        }
       }
-      Nil
-    } else {
-      Nil
     }
+    Nil
   }
 }
 

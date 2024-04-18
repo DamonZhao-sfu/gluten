@@ -228,6 +228,8 @@ class GlutenConfig(conf: SQLConf) extends Logging {
   def conservativeTaskOffHeapMemorySize: Long =
     conf.getConf(COLUMNAR_CONSERVATIVE_TASK_OFFHEAP_SIZE_IN_BYTES)
 
+  def sql2fpgaLibPath: String = conf.getConf(SQL2FPGA_LIB_PATH)
+
   def offloadToFPGA: Boolean = conf.getConf(OFFLOAD_TO_FPGA_ENABLED)
 
   def enableVeloxCache: Boolean = conf.getConf(COLUMNAR_VELOX_CACHE_ENABLED)
@@ -677,6 +679,13 @@ object GlutenConfig {
           "this config should be removed.")
       .booleanConf
       .createWithDefault(true)
+  
+  val SQL2FPGA_LIB_PATH = 
+    buildConf("spark.gluten.sql2fpga.libpath")
+        .internal()
+        .doc("sql2fpga .so lib path")
+        .stringConf
+        .createWithDefault("")
 
   val OFFLOAD_TO_FPGA_ENABLED =
     buildConf("spark.gluten.sql.enable.offloadtofpga")
