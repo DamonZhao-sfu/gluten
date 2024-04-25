@@ -105,7 +105,7 @@ WholeStageResultIterator::WholeStageResultIterator(
       veloxPlan_(planNode),
       scanNodeIds_(scanNodeIds),
       scanInfos_(scanInfos),
-      streamIds_(streamIds) {
+      streamIds_(streamIds){
 #ifdef ENABLE_HDFS
   gluten::updateHdfsTokens(veloxCfg_.get());
 #endif

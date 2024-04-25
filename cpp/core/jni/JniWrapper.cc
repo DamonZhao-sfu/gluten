@@ -433,8 +433,7 @@ Java_io_glutenproject_vectorized_PlanEvaluatorJniWrapper_nativeCreateKernelWithI
     auto arrayIter = makeJniColumnarBatchIterator(env, iter, ctx, writer);
     auto resultIter = std::make_shared<ResultIterator>(std::move(arrayIter));
     inputIters.push_back(std::move(resultIter));
-  }
-
+  } 
   return ctx->objectStore()->save(ctx->createResultIterator(memoryManager, spillDirStr, inputIters, conf));
   JNI_METHOD_END(kInvalidResourceHandle)
 }

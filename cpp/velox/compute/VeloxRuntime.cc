@@ -32,6 +32,7 @@
 #include "shuffle/VeloxShuffleWriter.h"
 #include "utils/ConfigExtractor.h"
 #include "utils/VeloxArrowUtils.h"
+#include "substrait/SubstraitToFPGAPlanValidator.h"
 
 using namespace facebook;
 
@@ -133,6 +134,17 @@ std::shared_ptr<ResultIterator> VeloxRuntime::createResultIterator(
   getInfoAndIds(veloxPlanConverter.splitInfos(), veloxPlan_->leafPlanNodeIds(), scanInfos, scanIds, streamIds);
 
   auto* vmm = toVeloxMemoryManager(memoryManager);
+  std::string offloadtofpga = "";
+  if (sessionConf.find("spark.gluten.sql.enable.offloadtofpga") != sessionConf.end()) {
+    offloadtofpga = sessionConf.at("spark.gluten.sql.enable.offloadtofpga");
+    if (offloadtofpga == "true") {
+      auto validator = std::make_unique<SubstraitToFPGAPlanValidator>();
+      if (validator.get()->validate(substraitPlan_)) {
+        auto sql2fpgaIter = std::make_unique<SQL2FPGAResultIterator>(inputs, sessionConf);
+        return std::make_shared<ResultIterator>(std::move(sql2fpgaIter), this);
+      }
+    }
+  }
   auto wholestageIter = std::make_unique<WholeStageResultIterator>(
       vmm, veloxPlan_, scanIds, scanInfos, streamIds, spillDir, sessionConf, taskInfo_);
   return std::make_shared<ResultIterator>(std::move(wholestageIter), this);
