@@ -17,7 +17,7 @@ GLUTEN_JAR=/localhdd/hza215/gluten/backends-velox/target/backends-velox-1.2.0-SN
 SPARK_HOME=/localhdd/hza215/spark/spark-3.2.1-bin-hadoop3.2/
 cat tpch_parquet.scala | ${SPARK_HOME}/bin/spark-shell \
   --master yarn --deploy-mode client \
-  --conf spark.plugins=io.glutenproject.GlutenPlugin \
+  --conf spark.plugins=org.apache.gluten.GlutenPlugin \
   --conf spark.driver.extraClassPath=${GLUTEN_JAR} \
   --conf spark.executor.extraClassPath=${GLUTEN_JAR} \
   --conf spark.memory.offHeap.enabled=true \

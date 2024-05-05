@@ -16,11 +16,11 @@
  */
 package org.apache.spark.shuffle
 
-import io.glutenproject.GlutenConfig
-import io.glutenproject.backendsapi.clickhouse.CHBackendSettings
-import io.glutenproject.memory.alloc.CHNativeMemoryAllocators
-import io.glutenproject.memory.memtarget.{MemoryTarget, Spiller, Spillers}
-import io.glutenproject.vectorized._
+import org.apache.gluten.GlutenConfig
+import org.apache.gluten.backendsapi.clickhouse.CHBackendSettings
+import org.apache.gluten.memory.alloc.CHNativeMemoryAllocators
+import org.apache.gluten.memory.memtarget.{MemoryTarget, Spiller, Spillers}
+import org.apache.gluten.vectorized._
 
 import org.apache.spark.SparkEnv
 import org.apache.spark.internal.Logging
@@ -46,6 +46,7 @@ class CHColumnarShuffleWriter[K, V](
 
   private val blockManager = SparkEnv.get.blockManager
   private val localDirs = SparkDirectoryUtil
+    .get()
     .namespace("ch-shuffle-write")
     .mkChildDirs(UUID.randomUUID().toString)
     .map(_.getAbsolutePath)
@@ -58,6 +59,9 @@ class CHColumnarShuffleWriter[K, V](
   private val throwIfMemoryExceed = GlutenConfig.getConf.chColumnarThrowIfMemoryExceed
   private val flushBlockBufferBeforeEvict =
     GlutenConfig.getConf.chColumnarFlushBlockBufferBeforeEvict
+  private val maxSortBufferSize = GlutenConfig.getConf.chColumnarMaxSortBufferSize
+  private val spillFirstlyBeforeStop = GlutenConfig.getConf.chColumnarSpillFirstlyBeforeStop
+  private val forceSortShuffle = GlutenConfig.getConf.chColumnarForceSortShuffle
   private val spillThreshold = GlutenConfig.getConf.chColumnarShuffleSpillThreshold
   private val jniWrapper = new CHShuffleSplitterJniWrapper
   // Are we in the process of stopping? Because map tasks can call stop() with success = true
@@ -108,7 +112,10 @@ class CHColumnarShuffleWriter[K, V](
         spillThreshold,
         CHBackendSettings.shuffleHashAlgorithm,
         throwIfMemoryExceed,
-        flushBlockBufferBeforeEvict
+        flushBlockBufferBeforeEvict,
+        maxSortBufferSize,
+        spillFirstlyBeforeStop,
+        forceSortShuffle
       )
       CHNativeMemoryAllocators.createSpillable(
         "ShuffleWriter",

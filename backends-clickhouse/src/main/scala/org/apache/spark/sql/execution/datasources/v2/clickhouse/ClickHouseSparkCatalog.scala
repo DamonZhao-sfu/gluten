@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 package org.apache.spark.sql.execution.datasources.v2.clickhouse
-import io.glutenproject.sql.shims.SparkShimLoader
+import org.apache.gluten.sql.shims.SparkShimLoader
 
 import org.apache.spark.sql.{AnalysisException, DataFrame, SparkSession}
 import org.apache.spark.sql.catalyst.TableIdentifier
@@ -227,7 +227,7 @@ class ClickHouseSparkCatalog
   override def loadTable(ident: Identifier): Table = {
     try {
       super.loadTable(ident) match {
-        case v1: V1Table if CHDataSourceUtils.isDeltaTable(v1.catalogTable) =>
+        case v1: V1Table if CHDataSourceUtils.isClickHouseTable(v1.catalogTable) =>
           new ClickHouseTableV2(
             spark,
             new Path(v1.catalogTable.location),

@@ -44,11 +44,18 @@ const uint32_t kSpillThreadNumDefaultValue = 0;
 const std::string kAggregationSpillEnabled = "spark.gluten.sql.columnar.backend.velox.aggregationSpillEnabled";
 const std::string kJoinSpillEnabled = "spark.gluten.sql.columnar.backend.velox.joinSpillEnabled";
 const std::string kOrderBySpillEnabled = "spark.gluten.sql.columnar.backend.velox.orderBySpillEnabled";
+
+// spill config
+// refer to
+// https://github.com/facebookincubator/velox/blob/95f3e80e77d046c12fbc79dc529366be402e9c2b/velox/docs/configs.rst#spilling
 const std::string kMaxSpillLevel = "spark.gluten.sql.columnar.backend.velox.maxSpillLevel";
 const std::string kMaxSpillFileSize = "spark.gluten.sql.columnar.backend.velox.maxSpillFileSize";
-const std::string kMinSpillRunSize = "spark.gluten.sql.columnar.backend.velox.minSpillRunSize";
 const std::string kSpillStartPartitionBit = "spark.gluten.sql.columnar.backend.velox.spillStartPartitionBit";
 const std::string kSpillPartitionBits = "spark.gluten.sql.columnar.backend.velox.spillPartitionBits";
+const std::string kMaxSpillRunRows = "spark.gluten.sql.columnar.backend.velox.MaxSpillRunRows";
+const std::string kMaxSpillBytes = "spark.gluten.sql.columnar.backend.velox.MaxSpillBytes";
+const std::string kSpillWriteBufferSize = "spark.gluten.sql.columnar.backend.velox.spillWriteBufferSize";
+
 const std::string kSpillableReservationGrowthPct =
     "spark.gluten.sql.columnar.backend.velox.spillableReservationGrowthPct";
 const std::string kSpillCompressionKind = "spark.io.compression.codec";
@@ -120,7 +127,8 @@ WholeStageResultIterator::WholeStageResultIterator(
       fmt::format("Gluten_Stage_{}_TID_{}", std::to_string(taskInfo_.stageId), std::to_string(taskInfo_.taskId)),
       std::move(planFragment),
       0,
-      std::move(queryCtx));
+      std::move(queryCtx),
+      velox::exec::Task::ExecutionMode::kSerial);
   if (!task_->supportsSingleThreadedExecution()) {
     throw std::runtime_error("Task doesn't support single thread execution: " + planNode->toString());
   }
@@ -474,11 +482,14 @@ std::unordered_map<std::string, std::string> WholeStageResultIterator::getQueryC
   // Find offheap size from Spark confs. If found, set the max memory usage of partial aggregation.
   // FIXME this uses process-wise off-heap memory which is not for task
   try {
-    auto defaultTimezone = veloxCfg_->get<std::string>(kDefaultSessionTimezone, "");
-    configs[velox::core::QueryConfig::kSessionTimezone] =
-        veloxCfg_->get<std::string>(kSessionTimezone, defaultTimezone);
+    if (veloxCfg_->isValueExists(kDefaultSessionTimezone)) {
+      configs[velox::core::QueryConfig::kSessionTimezone] = veloxCfg_->get<std::string>(kDefaultSessionTimezone, "");
+    }
+    if (veloxCfg_->isValueExists(kSessionTimezone)) {
+      configs[velox::core::QueryConfig::kSessionTimezone] = veloxCfg_->get<std::string>(kSessionTimezone, "");
+    }
     // Adjust timestamp according to the above configured session timezone.
-    configs[velox::core::QueryConfig::kAdjustTimestampToTimezone] = std::to_string(true);
+    configs[velox::core::QueryConfig::kAdjustTimestampToTimezone] = "true";
     // Align Velox size function with Spark.
     configs[velox::core::QueryConfig::kSparkLegacySizeOfNull] = std::to_string(veloxCfg_->get<bool>(kLegacySize, true));
 
@@ -497,7 +508,7 @@ std::unordered_map<std::string, std::string> WholeStageResultIterator::getQueryC
       configs[velox::core::QueryConfig::kAbandonPartialAggregationMinRows] =
           std::to_string(veloxCfg_->get<int32_t>(kAbandonPartialAggregationMinRows, 100000));
       // Spark's collect_set ignore nulls.
-      configs[velox::core::QueryConfig::kPrestoArrayAggIgnoreNulls] = std::to_string(true);
+      configs[velox::core::QueryConfig::kPrestoArrayAggIgnoreNulls] = "true";
     }
     // Spill configs
     if (spillStrategy_ == "none") {
@@ -513,9 +524,13 @@ std::unordered_map<std::string, std::string> WholeStageResultIterator::getQueryC
         std::to_string(veloxCfg_->get<bool>(kOrderBySpillEnabled, true));
     configs[velox::core::QueryConfig::kMaxSpillLevel] = std::to_string(veloxCfg_->get<int32_t>(kMaxSpillLevel, 4));
     configs[velox::core::QueryConfig::kMaxSpillFileSize] =
-        std::to_string(veloxCfg_->get<uint64_t>(kMaxSpillFileSize, 20L * 1024 * 1024));
-    configs[velox::core::QueryConfig::kMinSpillRunSize] =
-        std::to_string(veloxCfg_->get<uint64_t>(kMinSpillRunSize, 256 << 20));
+        std::to_string(veloxCfg_->get<uint64_t>(kMaxSpillFileSize, 1L * 1024 * 1024 * 1024));
+    configs[velox::core::QueryConfig::kMaxSpillRunRows] =
+        std::to_string(veloxCfg_->get<uint64_t>(kMaxSpillRunRows, 12L * 1024 * 1024));
+    configs[velox::core::QueryConfig::kMaxSpillBytes] =
+        std::to_string(veloxCfg_->get<uint64_t>(kMaxSpillBytes, 107374182400LL));
+    configs[velox::core::QueryConfig::kSpillWriteBufferSize] =
+        std::to_string(veloxCfg_->get<uint64_t>(kSpillWriteBufferSize, 4L * 1024 * 1024));
     configs[velox::core::QueryConfig::kSpillStartPartitionBit] =
         std::to_string(veloxCfg_->get<uint8_t>(kSpillStartPartitionBit, 29));
     configs[velox::core::QueryConfig::kJoinSpillPartitionBits] =
@@ -548,12 +563,13 @@ std::unordered_map<std::string, std::string> WholeStageResultIterator::getQueryC
 }
 
 std::shared_ptr<velox::Config> WholeStageResultIterator::createConnectorConfig() {
+  // The configs below are used at session level.
   std::unordered_map<std::string, std::string> configs = {};
   // The semantics of reading as lower case is opposite with case-sensitive.
   configs[velox::connector::hive::HiveConfig::kFileColumnNamesReadAsLowerCaseSession] =
       !veloxCfg_->get<bool>(kCaseSensitive, false) ? "true" : "false";
   configs[velox::connector::hive::HiveConfig::kPartitionPathAsLowerCaseSession] = "false";
-  configs[velox::connector::hive::HiveConfig::kParquetWriteTimestampUnit] = "6";
+  configs[velox::connector::hive::HiveConfig::kParquetWriteTimestampUnitSession] = "6";
   configs[velox::connector::hive::HiveConfig::kMaxPartitionsPerWritersSession] =
       std::to_string(veloxCfg_->get<int32_t>(kMaxPartitions, 10000));
   configs[velox::connector::hive::HiveConfig::kIgnoreMissingFilesSession] =

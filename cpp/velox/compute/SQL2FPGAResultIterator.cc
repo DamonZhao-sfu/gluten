@@ -94,7 +94,7 @@ SQL2FPGAResultIterator::SQL2FPGAResultIterator(
 
 std::shared_ptr<ColumnarBatch> SQL2FPGAResultIterator::next() {
   auto startTime = std::chrono::steady_clock::now();
-  auto batch = getNextBatch();
+  auto batch = getNextBatch(nativeFuncHandle_);
   //DLOG(INFO) << "FPGAIterator get a batch, num rows: " << (batch ? batch->num_rows() : 0);
   collectBatchTime_ +=
       std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - startTime).count();

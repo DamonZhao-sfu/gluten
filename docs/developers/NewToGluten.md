@@ -43,6 +43,18 @@ export PATH="$PATH:$JAVA_HOME/bin"
 
 > Must set PATH with double quote in ubuntu.
 
+## Openjdk17
+
+By defaults, Gluten compiles package using JDK8. Add maven profile `-Pjava-17` changing to use JDK17, and please make sure your JAVA_HOME points to jdk17.
+
+Apache Spark and Arrow requires setting java args `-Dio.netty.tryReflectionSetAccessible=true`, see [SPARK-29924](https://issues.apache.org/jira/browse/SPARK-29924) and [ARROW-6206](https://issues.apache.org/jira/browse/ARROW-6206).
+So please add following configs in `spark-defaults.conf`:
+
+```
+spark.driver.extraJavaOptions=-Dio.netty.tryReflectionSetAccessible=true
+spark.executor.extraJavaOptions=-Dio.netty.tryReflectionSetAccessible=true
+```
+
 ## Maven 3.6.3 or above
 
 [Maven Dowload Page](https://maven.apache.org/docs/history.html)
@@ -53,7 +65,7 @@ And then set the environment setting.
 # Compile gluten using debug mode
 
 If you want to just debug java/scala code, there is no need to compile cpp code with debug mode.
-You can just refer to [build-gluten-with-velox-backend](../get-started/Velox.md#2-build-gluten-with-velox-backend).
+You can just refer to [build-gluten-with-velox-backend](../get-started/Velox.md#build-gluten-with-velox-backend).
 
 If you need to debug cpp code, please compile the backend code and gluten cpp code with debug mode.
 
@@ -108,8 +120,8 @@ To generate a fix for Java/Scala code style, you can run one or more of the belo
 
 For Velox backend:
 ```
-mvn spotless:apply -Pbackends-velox -Prss -Pspark-3.2 -Pspark-ut -DskipTests
-mvn spotless:apply -Pbackends-velox -Prss -Pspark-3.3 -Pspark-ut -DskipTests
+mvn spotless:apply -Pbackends-velox -Pceleborn -Puniffle -Pspark-3.2 -Pspark-ut -DskipTests
+mvn spotless:apply -Pbackends-velox -Pceleborn -Puniffle -Pspark-3.3 -Pspark-ut -DskipTests
 ```
 For Clickhouse backend:
 ```
@@ -368,10 +380,10 @@ We can run gluten + velox on clean machine by one command (supported OS: Ubuntu2
 ```
 spark-shell --name run_gluten \
  --master yarn --deploy-mode client \
- --conf spark.plugins=io.glutenproject.GlutenPlugin \
+ --conf spark.plugins=org.apache.gluten.GlutenPlugin \
  --conf spark.memory.offHeap.enabled=true \
  --conf spark.memory.offHeap.size=20g \
- --jars https://github.com/apache/incubator-gluten/releases/download/v1.0.0/gluten-velox-bundle-spark3.2_2.12-ubuntu_20.04_x86_64-1.0.0.jar \
+ --jars https://github.com/apache/incubator-gluten/releases/download/v1.1.1/gluten-velox-bundle-spark3.2_2.12-1.1.1.jar \
  --conf spark.shuffle.manager=org.apache.spark.shuffle.sort.ColumnarShuffleManager
 ```
 

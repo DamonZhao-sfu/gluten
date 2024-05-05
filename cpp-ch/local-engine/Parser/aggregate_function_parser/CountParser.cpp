@@ -14,8 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include <Parser/aggregate_function_parser/CountParser.h>
+#include <DataTypes/DataTypeNullable.h>
+#include <DataTypes/DataTypesNumber.h>
 #include <Interpreters/ActionsDAG.h>
+#include <Parser/aggregate_function_parser/CountParser.h>
 #include <Common/CHUtil.h>
 
 namespace DB
@@ -34,10 +36,12 @@ String CountParser::getCHFunctionName(const CommonFunctionInfo &) const
 {
     return "count";
 }
-String CountParser::getCHFunctionName(const DB::DataTypes &) const
+
+String CountParser::getCHFunctionName(DB::DataTypes &) const
 {
     return "count";
 }
+
 DB::ActionsDAG::NodeRawConstPtrs CountParser::parseFunctionArguments(
     const CommonFunctionInfo & func_info, const String & /*ch_func_name*/, DB::ActionsDAGPtr & actions_dag) const
 {
@@ -45,7 +49,7 @@ DB::ActionsDAG::NodeRawConstPtrs CountParser::parseFunctionArguments(
     {
         throw DB::Exception(DB::ErrorCodes::BAD_ARGUMENTS, "Function {} requires at least one argument", getName());
     }
-    
+
     const DB::ActionsDAG::Node * last_arg_node = nullptr;
     if (func_info.arguments.size() == 1)
     {
@@ -82,5 +86,6 @@ DB::ActionsDAG::NodeRawConstPtrs CountParser::parseFunctionArguments(
     }
     return {last_arg_node};
 }
+
 static const AggregateFunctionParserRegister<CountParser> register_count;
 }

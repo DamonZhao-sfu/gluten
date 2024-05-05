@@ -17,28 +17,69 @@
 
 #pragma once
 
-#include <velox/type/Type.h>
+#include <boost/container_hash/hash.hpp>
+#include <google/protobuf/arena.h>
 #include <unordered_map>
 #include <vector>
+#include "substrait/VeloxToSubstraitType.h"
+#include "velox/type/Type.h"
+#include "velox/type/fbhive/HiveTypeParser.h"
 
 namespace gluten {
 
 class UdfLoader {
  public:
+  struct UdfSignature {
+    std::string name;
+    std::string returnType;
+    std::string argTypes;
+
+    std::string intermediateType{};
+
+    bool variableArity;
+
+    UdfSignature(std::string name, std::string returnType, std::string argTypes, bool variableArity)
+        : name(name), returnType(returnType), argTypes(argTypes), variableArity(variableArity) {}
+
+    UdfSignature(
+        std::string name,
+        std::string returnType,
+        std::string argTypes,
+        std::string intermediateType,
+        bool variableArity)
+        : name(name),
+          returnType(returnType),
+          argTypes(argTypes),
+          intermediateType(intermediateType),
+          variableArity(variableArity) {}
+
+    ~UdfSignature() = default;
+  };
+
   static std::shared_ptr<UdfLoader> getInstance();
 
   void loadUdfLibraries(const std::string& libPaths);
 
-  std::unordered_map<std::string, std::string> getUdfMap();
+  std::unordered_set<std::shared_ptr<UdfSignature>> getRegisteredUdfSignatures();
+
+  std::unordered_set<std::string> getRegisteredUdafNames();
 
   void registerUdf();
-
-  // unused
-  bool validateUdf(const std::string& name, const std::vector<facebook::velox::TypePtr>& argTypes);
 
  private:
   void loadUdfLibraries0(const std::vector<std::string>& libPaths);
 
+  std::string toSubstraitTypeStr(const std::string& type);
+
+  std::string toSubstraitTypeStr(int32_t numArgs, const char** args);
+
   std::unordered_map<std::string, void*> handles_;
+
+  facebook::velox::type::fbhive::HiveTypeParser parser_{};
+  google::protobuf::Arena arena_{};
+  VeloxToSubstraitTypeConvertor convertor_{};
+
+  std::unordered_set<std::shared_ptr<UdfSignature>> signatures_;
+  std::unordered_set<std::string> names_;
 };
 } // namespace gluten

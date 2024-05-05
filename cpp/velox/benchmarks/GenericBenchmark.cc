@@ -31,7 +31,7 @@
 #include "config/GlutenConfig.h"
 #include "shuffle/LocalPartitionWriter.h"
 #include "shuffle/VeloxShuffleWriter.h"
-#include "shuffle/rss/CelebornPartitionWriter.h"
+#include "shuffle/rss/RssPartitionWriter.h"
 #include "utils/StringUtil.h"
 #include "utils/VeloxArrowUtils.h"
 #include "utils/exception.h"
@@ -46,7 +46,7 @@ DEFINE_bool(print_result, true, "Print result for execution");
 DEFINE_string(save_output, "", "Path to parquet file for saving the task output iterator");
 DEFINE_bool(with_shuffle, false, "Add shuffle split at end.");
 DEFINE_string(partitioning, "rr", "Short partitioning name. Valid options are rr, hash, range, single");
-DEFINE_bool(celeborn, false, "Mocking celeborn shuffle.");
+DEFINE_bool(rss, false, "Mocking rss.");
 DEFINE_bool(zstd, false, "Use ZSTD as shuffle compression codec");
 DEFINE_bool(qat_gzip, false, "Use QAT GZIP as shuffle compression codec");
 DEFINE_bool(qat_zstd, false, "Use QAT ZSTD as shuffle compression codec");
@@ -90,9 +90,9 @@ std::shared_ptr<VeloxShuffleWriter> createShuffleWriter(
   }
 
   std::unique_ptr<PartitionWriter> partitionWriter;
-  if (FLAGS_celeborn) {
+  if (FLAGS_rss) {
     auto rssClient = std::make_unique<LocalRssClient>(dataFile);
-    partitionWriter = std::make_unique<CelebornPartitionWriter>(
+    partitionWriter = std::make_unique<RssPartitionWriter>(
         FLAGS_shuffle_partitions,
         std::move(partitionWriterOptions),
         memoryManager->getArrowMemoryPool(),
@@ -174,7 +174,7 @@ auto BM_Generic = [](::benchmark::State& state,
           });
     }
     runtime->injectWriteFilesTempPath(FLAGS_write_path);
-    runtime->parsePlan(reinterpret_cast<uint8_t*>(plan.data()), plan.size(), {}, std::nullopt);
+    runtime->parsePlan(reinterpret_cast<uint8_t*>(plan.data()), plan.size(), std::nullopt);
     for (auto& split : splits) {
       runtime->parseSplitInfo(reinterpret_cast<uint8_t*>(split.data()), split.size(), std::nullopt);
     }
