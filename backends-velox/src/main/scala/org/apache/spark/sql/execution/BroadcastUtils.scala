@@ -16,17 +16,17 @@
  */
 package org.apache.spark.sql.execution
 
-import io.glutenproject.columnarbatch.ColumnarBatches
-import io.glutenproject.memory.nmm.NativeMemoryManagers
-import io.glutenproject.sql.shims.SparkShimLoader
-import io.glutenproject.vectorized.{ColumnarBatchSerializeResult, ColumnarBatchSerializerJniWrapper}
+import org.apache.gluten.columnarbatch.ColumnarBatches
+import org.apache.gluten.memory.nmm.NativeMemoryManagers
+import org.apache.gluten.sql.shims.SparkShimLoader
+import org.apache.gluten.vectorized.{ColumnarBatchSerializeResult, ColumnarBatchSerializerJniWrapper}
 
 import org.apache.spark.SparkContext
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.UnsafeRow
 import org.apache.spark.sql.catalyst.plans.physical.{BroadcastMode, BroadcastPartitioning, IdentityBroadcastMode, Partitioning}
-import org.apache.spark.sql.execution.joins.{HashedRelation, HashedRelationBroadcastMode}
+import org.apache.spark.sql.execution.joins.{HashedRelation, HashedRelationBroadcastMode, LongHashedRelation}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.ColumnarBatch
 import org.apache.spark.util.TaskResources
@@ -67,7 +67,7 @@ object BroadcastUtils {
           val rowArray = new ArrayBuffer[InternalRow]
 
           /**
-           * [[io.glutenproject.execution.VeloxColumnarToRowExec.toRowIterator()]] creates a single
+           * [[org.apache.gluten.execution.VeloxColumnarToRowExec.toRowIterator()]] creates a single
            * UnsafeRow. The iterator uses this same unsafe row and keep on changing the pointer to
            * point to new value. If we directly call rowIterator.toArray() then all the elements in
            * array points to same UnsafeRow object resulting in wrong output. here we need to create
@@ -96,9 +96,8 @@ object BroadcastUtils {
         // HashedRelation to ColumnarBuildSideRelation.
         val fromBroadcast = from.asInstanceOf[Broadcast[HashedRelation]]
         val fromRelation = fromBroadcast.value.asReadOnlyCopy()
-        val keys = fromRelation.keys()
         val toRelation = TaskResources.runUnsafe {
-          val batchItr: Iterator[ColumnarBatch] = fn(keys.flatMap(key => fromRelation.get(key)))
+          val batchItr: Iterator[ColumnarBatch] = fn(reconstructRows(fromRelation))
           val serialized: Array[Array[Byte]] = serializeStream(batchItr) match {
             case ColumnarBatchSerializeResult.EMPTY =>
               Array()
@@ -169,5 +168,18 @@ object BroadcastUtils {
         filtered.foreach(ColumnarBatches.release)
       }
     serializeResult
+  }
+
+  private def reconstructRows(relation: HashedRelation): Iterator[InternalRow] = {
+    // It seems that LongHashedRelation and UnsafeHashedRelation don't follow the same
+    //  criteria while getting values from them.
+    // Should review the internals of this part of code.
+    relation match {
+      case relation: LongHashedRelation if relation.keyIsUnique =>
+        relation.keys().map(k => relation.getValue(k))
+      case relation: LongHashedRelation if !relation.keyIsUnique =>
+        relation.keys().flatMap(k => relation.get(k))
+      case other => other.valuesWithKeyIndex().map(_.getValue)
+    }
   }
 }

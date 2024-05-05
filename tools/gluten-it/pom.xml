@@ -4,7 +4,7 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
-  <groupId>io.glutenproject</groupId>
+  <groupId>org.apache.gluten</groupId>
   <artifactId>gluten-it</artifactId>
   <version>1.2.0-SNAPSHOT</version>
   <packaging>pom</packaging>
@@ -14,13 +14,15 @@
   </modules>
 
   <properties>
-    <maven.compiler.source>8</maven.compiler.source>
-    <maven.compiler.target>8</maven.compiler.target>
+    <java.version>1.8</java.version>
+    <maven.compiler.source>${java.version}</maven.compiler.source>
+    <maven.compiler.target>${java.version}</maven.compiler.target>
     <scala.library.version>2.12.15</scala.library.version>
     <spark.version>3.4.2</spark.version>
     <scala.binary.version>2.12</scala.binary.version>
     <spark.major.version>3</spark.major.version>
     <celeborn.version>0.3.0-incubating</celeborn.version>
+    <uniffle.version>0.8.0</uniffle.version>
     <gluten.version>1.2.0-SNAPSHOT</gluten.version>
     <guava.version>32.0.1-jre</guava.version>
     <tpch.version>1.1</tpch.version>
@@ -30,12 +32,12 @@
   <dependencyManagement>
     <dependencies>
       <dependency>
-        <groupId>io.glutenproject</groupId>
+        <groupId>org.apache.gluten</groupId>
         <artifactId>gluten-package</artifactId>
         <version>${gluten.version}</version>
         <exclusions>
           <exclusion>
-            <groupId>io.glutenproject</groupId>
+            <groupId>org.apache.gluten</groupId>
             <artifactId>gluten-core</artifactId>
           </exclusion>
         </exclusions>
@@ -89,6 +91,24 @@
   </dependencyManagement>
 
   <profiles>
+    <profile>
+      <id>java-8</id>
+      <activation>
+        <jdk>1.8</jdk>
+      </activation>
+      <properties>
+        <java.version>1.8</java.version>
+      </properties>
+    </profile>
+    <profile>
+      <id>java-17</id>
+      <activation>
+        <jdk>17</jdk>
+      </activation>
+      <properties>
+        <java.version>17</java.version>
+      </properties>
+    </profile>
     <profile>
       <id>spark-3.2</id>
       <activation>

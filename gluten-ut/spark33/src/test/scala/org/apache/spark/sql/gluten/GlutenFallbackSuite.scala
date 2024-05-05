@@ -16,10 +16,10 @@
  */
 package org.apache.spark.sql.gluten
 
-import io.glutenproject.{GlutenConfig, VERSION}
-import io.glutenproject.events.GlutenPlanFallbackEvent
-import io.glutenproject.execution.FileSourceScanExecTransformer
-import io.glutenproject.utils.BackendTestUtils
+import org.apache.gluten.{GlutenConfig, VERSION}
+import org.apache.gluten.events.GlutenPlanFallbackEvent
+import org.apache.gluten.execution.FileSourceScanExecTransformer
+import org.apache.gluten.utils.BackendTestUtils
 
 import org.apache.spark.scheduler.{SparkListener, SparkListenerEvent}
 import org.apache.spark.sql.{GlutenSQLTestsTrait, Row}
@@ -43,7 +43,7 @@ class GlutenFallbackSuite extends GlutenSQLTestsTrait with AdaptiveSparkPlanHelp
         }
       }
       val msgRegex = """Validation failed for plan: Scan parquet default\.t\[QueryId=[0-9]+\],""" +
-        """ due to: columnar FileScan is not enabled in FileSourceScanExec\."""
+        """ due to: \[FallbackByUserOptions\] Validation failed on node Scan parquet default\.t\."""
       assert(testAppender.loggingEvents.exists(_.getMessage.getFormattedMessage.matches(msgRegex)))
     }
   }
@@ -90,7 +90,9 @@ class GlutenFallbackSuite extends GlutenSQLTestsTrait with AdaptiveSparkPlanHelp
         assert(execution.get.numFallbackNodes == 1)
         val fallbackReason = execution.get.fallbackNodeToReason.head
         assert(fallbackReason._1.contains("Scan parquet default.t"))
-        assert(fallbackReason._2.contains("columnar FileScan is not enabled in FileSourceScanExec"))
+        assert(
+          fallbackReason._2.contains(
+            "[FallbackByUserOptions] Validation failed on node Scan parquet default.t"))
       }
     }
 

@@ -83,6 +83,9 @@ TypePtr SubstraitParser::parseType(const ::substrait::Type& substraitType, bool 
       auto scale = substraitType.decimal().scale();
       return DECIMAL(precision, scale);
     }
+    case ::substrait::Type::KindCase::kIntervalYear: {
+      return INTERVAL_YEAR_MONTH();
+    }
     case ::substrait::Type::KindCase::kNothing:
       return UNKNOWN();
     default:
@@ -391,11 +394,19 @@ std::unordered_map<std::string, std::string> SubstraitParser::substraitVeloxFunc
     {"named_struct", "row_constructor"},
     {"bit_or", "bitwise_or_agg"},
     {"bit_and", "bitwise_and_agg"},
+    {"bitwise_and", "spark_bitwise_and"},
+    {"bitwise_not", "spark_bitwise_not"},
+    {"bitwise_or", "spark_bitwise_or"},
+    {"bitwise_xor", "spark_bitwise_xor"},
     {"murmur3hash", "hash_with_seed"},
+    {"xxhash64", "xxhash64_with_seed"},
     {"modulus", "remainder"},
     {"date_format", "format_datetime"},
     {"collect_set", "set_agg"},
-    {"collect_list", "array_agg"}};
+    {"try_add", "plus"},
+    {"forall", "all_match"},
+    {"exists", "any_match"},
+    {"negative", "unaryminus"}};
 
 const std::unordered_map<std::string, std::string> SubstraitParser::typeMap_ = {
     {"bool", "BOOLEAN"},

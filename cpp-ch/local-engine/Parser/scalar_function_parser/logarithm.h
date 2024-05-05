@@ -15,10 +15,10 @@
  * limitations under the License.
  */
 
+#include <Core/Field.h>
+#include <DataTypes/DataTypeNullable.h>
 #include <Parser/FunctionParser.h>
 #include <Common/CHUtil.h>
-#include <Core/Field.h>
-#include <DataTypes/IDataType.h>
 
 namespace DB
 {
@@ -38,7 +38,7 @@ public:
     explicit FunctionParserLogBase(SerializedPlanParser * plan_parser_) : FunctionParser(plan_parser_) {}
     ~FunctionParserLogBase() override = default;
 
-    virtual String getCHFunctionName() const { return "log"; }
+    virtual String getCHFunctionName() const = 0;
     virtual const DB::ActionsDAG::Node * getParameterLowerBound(ActionsDAGPtr &, const DataTypePtr &) const { return nullptr; }
 
     const ActionsDAG::Node * parse(

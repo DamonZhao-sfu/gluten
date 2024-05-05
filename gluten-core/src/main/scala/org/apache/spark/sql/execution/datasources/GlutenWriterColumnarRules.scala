@@ -16,9 +16,9 @@
  */
 package org.apache.spark.sql.execution.datasources
 
-import io.glutenproject.backendsapi.BackendsApiManager
-import io.glutenproject.execution.ColumnarToRowExecBase
-import io.glutenproject.extension.GlutenPlan
+import org.apache.gluten.backendsapi.BackendsApiManager
+import org.apache.gluten.execution.ColumnarToRowExecBase
+import org.apache.gluten.extension.GlutenPlan
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SparkSession
@@ -156,11 +156,14 @@ object GlutenWriterColumnarRules {
           if write.getClass.getName == NOOP_WRITE &&
             BackendsApiManager.getSettings.enableNativeWriteFiles() =>
         injectFakeRowAdaptor(rc, rc.child)
-      case rc @ DataWritingCommandExec(cmd, child) =>
+      case rc @ DataWritingCommandExec(cmd, child)
+          if BackendsApiManager.getSettings.supportNativeWrite(child.output.toStructType.fields) =>
         val format = getNativeFormat(cmd)
         session.sparkContext.setLocalProperty(
           "staticPartitionWriteOnly",
           BackendsApiManager.getSettings.staticPartitionWriteOnly().toString)
+        // FIXME: We should only use context property if having no other approaches.
+        //  Should see if there is another way to pass these options.
         session.sparkContext.setLocalProperty("isNativeAppliable", format.isDefined.toString)
         session.sparkContext.setLocalProperty("nativeFormat", format.getOrElse(""))
         if (format.isDefined) {

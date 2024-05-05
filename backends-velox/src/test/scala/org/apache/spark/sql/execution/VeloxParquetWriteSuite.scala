@@ -16,16 +16,14 @@
  */
 package org.apache.spark.sql.execution
 
-import io.glutenproject.execution.VeloxWholeStageTransformerSuite
-import io.glutenproject.sql.shims.SparkShimLoader
-import io.glutenproject.utils.FallbackUtil
+import org.apache.gluten.execution.VeloxWholeStageTransformerSuite
+import org.apache.gluten.utils.FallbackUtil
 
 import org.apache.spark.SparkConf
 
 import org.junit.Assert
 
 class VeloxParquetWriteSuite extends VeloxWholeStageTransformerSuite {
-  override protected val backend: String = "velox"
   override protected val resourcePath: String = "/tpch-data-parquet-velox"
   override protected val fileFormat: String = "parquet"
 
@@ -38,7 +36,21 @@ class VeloxParquetWriteSuite extends VeloxWholeStageTransformerSuite {
     super.sparkConf.set("spark.gluten.sql.native.writer.enabled", "true")
   }
 
-  test("test write parquet with compression codec") {
+  test("test Array(Struct) fallback") {
+    withTempPath {
+      f =>
+        val path = f.getCanonicalPath
+        val testAppender = new LogAppender("native write tracker")
+        withLogAppender(testAppender) {
+          spark.sql("select array(struct(1), null) as var1").write.mode("overwrite").save(path)
+        }
+        assert(
+          testAppender.loggingEvents.exists(
+            _.getMessage.toString.contains("Use Gluten parquet write for hive")) == false)
+    }
+  }
+
+  testWithSpecifiedSparkVersion("test write parquet with compression codec", Some("3.2")) {
     // compression codec details see `VeloxParquetDatasource.cc`
     Seq("snappy", "gzip", "zstd", "lz4", "none", "uncompressed")
       .foreach {
@@ -60,7 +72,7 @@ class VeloxParquetWriteSuite extends VeloxWholeStageTransformerSuite {
                   val files = f.list()
                   assert(files.nonEmpty, extension)
 
-                  if (!SparkShimLoader.getSparkVersion.startsWith("3.4")) {
+                  if (!isSparkVersionGE("3.4")) {
                     assert(
                       files.exists(_.contains(extension)),
                       extension
