@@ -137,7 +137,9 @@ std::shared_ptr<ResultIterator> VeloxRuntime::createResultIterator(
   std::string offloadtofpga = "";
   if (sessionConf.find("spark.gluten.sql.enable.offloadtofpga") != sessionConf.end()) {
     offloadtofpga = sessionConf.at("spark.gluten.sql.enable.offloadtofpga");
-    if (offloadtofpga == "true") {
+    // only when .so file is generated
+    // val libPath = "/localhdd/hza215/gluten/SQL2FPGA/libsql2fpga.so"
+    if (offloadtofpga == "true" && std::filesystem::exists("/localhdd/hza215/gluten/SQL2FPGA/libsql2fpga.so")) {
       auto validator = std::make_unique<SubstraitToFPGAPlanValidator>();
       if (validator.get()->validate(substraitPlan_)) {
         auto sql2fpgaIter = std::make_unique<SQL2FPGAResultIterator>(inputs, sessionConf);

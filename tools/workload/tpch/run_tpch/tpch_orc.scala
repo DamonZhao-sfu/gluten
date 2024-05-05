@@ -81,9 +81,8 @@ for (t <- sorted) {
   val fileContents = Source.fromFile(t).getLines.filter(!_.startsWith("--")).mkString(" ")
   println(fileContents)
   try {
-    time{spark.sql(fileContents).show}
+    //time{spark.sql(fileContents).show}
     //spark.sql(fileContents).explain
-    Thread.sleep(2000)
   } catch {
     case e: Exception => None
   }

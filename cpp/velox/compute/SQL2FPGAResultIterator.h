@@ -28,6 +28,8 @@
 #include "velox/core/PlanNode.h"
 #include "velox/exec/Task.h"
 
+#include <dlfcn.h>
+
 namespace gluten {
 
 class SQL2FPGAResultIterator : public ColumnarBatchIterator {
@@ -37,6 +39,7 @@ class SQL2FPGAResultIterator : public ColumnarBatchIterator {
     const std::unordered_map<std::string, std::string>& confMap);
 
   virtual ~SQL2FPGAResultIterator() {
+    dlclose(nativeFuncHandle_);
   }
 
   std::shared_ptr<ColumnarBatch> next() override;
@@ -46,10 +49,11 @@ class SQL2FPGAResultIterator : public ColumnarBatchIterator {
 
  private:
   std::unordered_map<std::string, std::string> getQueryContextConf();
-  /// Memory.
-  std::vector<std::shared_ptr<ResultIterator>> iters_;
+  std::vector<std::shared_ptr<ResultIterator>> inputs;
   std::unordered_map<std::string, std::string>& confMap_;
+  void* nativeFuncHandle_;
 
+  static const int kDefaultDlopenFlags = RTLD_LOCAL | RTLD_LAZY;
 };
 
 } // namespace gluten
