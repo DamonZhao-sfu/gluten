@@ -14,6 +14,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+#include <arrow/ipc/api.h>
+
 #include "WholeStageResultIterator.h"
 #include "VeloxBackend.h"
 #include "VeloxRuntime.h"
@@ -40,46 +43,26 @@ void* loadLibrary(
   return loadedLib;
 }
 
-
-/*template <typename Func>
-Func getFunction(const std::string& functionName, void* libraryPtr) {
-  constexpr bool isFunctionPtr = std::is_pointer_v<Func> &&
-      std::is_function_v<std::remove_pointer_t<Func>>;
-  static_assert(
-      isFunctionPtr, "Template argument need to be a function pointer");
-  if (loadedLibraries.find(libraryPtr) == loadedLibraries.end()) {
-    throw NativeLibraryLoaderException(
-        fmt::format("No library loaded at {}", libraryPtr));
-  };
-  auto func =
-      loadedLibraries[libraryPtr].functionTable->exportedFunctions.find(
-          functionName);
-  if (func ==
-      loadedLibraries[libraryPtr].functionTable->exportedFunctions.end()) {
-    throw NativeLibraryLoaderException(fmt::format(
-        "library loaded at {} doesn't export function {}",
-        libraryPtr,
-        functionName));
-  }
-  if (typeid(Func).hash_code() != func->second.typeInfo) {
-    throw NativeLibraryLoaderException(fmt::format(
-        "library loaded at {} exports function {} with a different type",
-        libraryPtr,
-        functionName));
-  };
-  return reinterpret_cast<Func>(func->second.functionAddress);
-}*/
-
 void offload(void* handle, const std::vector<std::shared_ptr<ResultIterator>>& inputs) {
   auto offloadPtr = reinterpret_cast<offloadPtr>(dlsym(handle, "offload"));
+  char *err = dlerror();
   //Check if the function was found
-  if (!offloadPtr) {
+  if (err != nullptr) {
       std::cerr << "Error finding function " << "offload" << ": " << dlerror() << std::endl;
       return;
   }
+
+  for (auto iter : inputs) {
+    while(iter->hasNext()) {
+      auto batch = iter->next();
+      std::shared_ptr<ArrowSchema> schema = batch->exportArrowSchema();
+      std::shared_ptr<ArrowArray> array = batch->exportArrowArray();
+      auto rb = arrow::ImportRecordBatch(array.get(), schema.get());
+    }
+  }
+
   (*offloadPtr)(inputs);
 }
-
 
 SQL2FPGAResultIterator::SQL2FPGAResultIterator(
     const std::vector<std::shared_ptr<ResultIterator>>& inputs,
@@ -89,10 +72,13 @@ SQL2FPGAResultIterator::SQL2FPGAResultIterator(
   nativeFuncHandle_ = loadLibrary("/localhdd/hza215/gluten/SQL2FPGA/libsql2fpga.so");
 
   offload(nativeFuncHandle_, inputs);
+
 }
 
 
 std::shared_ptr<ColumnarBatch> SQL2FPGAResultIterator::next() {
+  waitForFinish(nativeFuncHandle_);
+  // WAIT UNTIL KERNEL FINISHES
   auto startTime = std::chrono::steady_clock::now();
   auto batch = getNextBatch(nativeFuncHandle_);
   //DLOG(INFO) << "FPGAIterator get a batch, num rows: " << (batch ? batch->num_rows() : 0);
@@ -102,7 +88,6 @@ std::shared_ptr<ColumnarBatch> SQL2FPGAResultIterator::next() {
     return nullptr;
   }
   return std::make_shared<gluten::ArrowColumnarBatch>(batch);
- 
 }
 
 int64_t SQL2FPGAResultIterator::spillFixedSize(int64_t size) {
