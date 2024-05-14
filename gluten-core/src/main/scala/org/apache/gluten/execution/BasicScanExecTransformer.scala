@@ -35,7 +35,6 @@ import org.apache.spark.sql.vectorized.ColumnarBatch
 
 import com.google.common.collect.Lists
 import com.google.protobuf.StringValue
-import sfu.ca.hiaccel.{SQL2FPGA_QPlan, SQL2FPGAContext}
 
 import scala.collection.JavaConverters._
 
@@ -132,12 +131,6 @@ trait BasicScanExecTransformer extends LeafTransformSupport with BaseDataSource 
     } else {
       existingFields
     }
-  }
-
-  override def doTransform(context: SQL2FPGAContext): SQL2FPGATransformContext = {
-    val output = outputAttributes()
-    val root = new SQL2FPGA_QPlan
-    SQL2FPGATransformContext(output, output, root)
   }
 
   override def doTransform(context: SubstraitContext): TransformContext = {

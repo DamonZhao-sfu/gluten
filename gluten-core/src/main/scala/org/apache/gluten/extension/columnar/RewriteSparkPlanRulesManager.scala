@@ -29,8 +29,6 @@ import org.apache.spark.sql.execution.aggregate.BaseAggregateExec
 import org.apache.spark.sql.execution.joins.BaseJoinExec
 import org.apache.spark.sql.execution.window.WindowExec
 
-import sfu.ca.hiaccel.{SQL2FPGA_Codegen, SQL2FPGA_QConfig, SQL2FPGA_QParser}
-
 case class RewrittenNodeWall(originalChild: SparkPlan) extends LeafExecNode {
   override protected def doExecute(): RDD[InternalRow] = throw new UnsupportedOperationException()
   override def supportsColumnar: Boolean = originalChild.supportsColumnar
@@ -49,12 +47,6 @@ case class RewrittenNodeWall(originalChild: SparkPlan) extends LeafExecNode {
 
 class RewriteSparkPlanRulesManager private (rewriteRules: Seq[Rule[SparkPlan]])
   extends Rule[SparkPlan] {
-  @transient val codegen = new SQL2FPGA_Codegen
-  @transient val qParser = new SQL2FPGA_QParser
-  @transient val qConfig = new SQL2FPGA_QConfig
-  qConfig.pure_sw_mode = 0
-  qConfig.scale_factor = 1
-
   private def mayNeedRewrite(plan: SparkPlan): Boolean = {
     TransformHints.isTransformable(plan) && {
       plan match {

@@ -53,6 +53,12 @@ case class SQL2FPGAOverrides(session: SparkSession) extends Strategy {
   qConfig.format = "orc"
   qConfig.basePath = "/localhdd/hza215/Vitis_Libraries/database/L2/demos/obj_FPGA_1_xilinx_u280_xdma_201920_3"
 
+  // TODO return all the nodes that can be offloaded to FPGA, then tag NotTransformable
+  def tagNotTransformable(plan: LogicalPlan, reason: String): LogicalPlan = {
+    plan.setTagValue(TAG, TRANSFORM_UNSUPPORTED(Some(reason)))
+    plan
+  }
+
   override def apply(plan: LogicalPlan): Seq[SparkPlan] = {
     if (GlutenConfig.getConf.offloadToFPGA) {
       plan match {
@@ -89,7 +95,7 @@ case class SQL2FPGAOverrides(session: SparkSession) extends Strategy {
           val libPath = GlutenConfig.getConf.sql2fpgaLibPath
           linker.compileCppToSharedLibrary(queryNo, qConfig, libPath)
           JniLibLoader.loadFromPath(libPath, false)
-          val wrapper = new JNIWrapper
+          val wrapper = new SQL2FPGAJNIWrapper
           wrapper.runQuery(Array("-xclbin", "/localhdd/hza215/Vitis_Libraries/database/L2/demos/build_join_partition/xclbin_xilinx_u280_xdma_201920_3_hw/gqe_join.xclbin",
           "-xclbin_a", "/localhdd/hza215/Vitis_Libraries/database/L2/demos/build_aggr_partition/xclbin_xilinx_u280_xdma_201920_3_hw/gqe_aggr.xclbin",
           "-xclbin_h", "/localhdd/hza215/Vitis_Libraries/database/L2/demos/build_join_partition/xclbin_xilinx_u280_xdma_201920_3_hw/gqe_join.xclbin",
@@ -98,8 +104,23 @@ case class SQL2FPGAOverrides(session: SparkSession) extends Strategy {
           "-p","16"))
         }
         case _ => {
-          
+
         }
+      }
+
+      
+      // get the sql2fpga plan to see whether it's allocated to CPU or FPGA
+      var nodeName = plan.nodeName
+      //   this_node._nodeType == "JOIN_INNER" || this_node._nodeType == "JOIN_LEFTANTI" ||
+      //      this_node._nodeType == "JOIN_LEFTSEMI" || this_node._nodeType == "JOIN_LEFTOUTER" || this_node._nodeType == "JOIN_FULLOUTER"
+      if (nodeName == "Aggregate") {
+          val aggrPhysicalPlan = planLater(plan)
+          FPGAAggrExec(aggrPhysicalPlan)
+          tagNotTransformable(plan, "offloaded to fpga")
+      } else if (nodeName == "JOIN_INNER" || nodeName == "JOIN_LEFTANTI" || nodeName == "JOIN_LEFTSEMI" || nodeName == "JOIN_LEFTOUTER") {
+          val joinPhysicalPlan = planLater(plan)
+          FPGAJoinExec(joinPhysicalPlan)
+          tagNotTransformable(plan, "offloaded to fpga")
       }
     }
     Nil

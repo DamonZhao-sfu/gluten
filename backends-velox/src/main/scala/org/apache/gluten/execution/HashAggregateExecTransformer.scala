@@ -35,8 +35,6 @@ import org.apache.spark.sql.expression.UserDefinedAggregateFunction
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 
-import sfu.ca.hiaccel.{SQL2FPGA_QPlan, SQL2FPGAContext}
-
 import com.google.protobuf.StringValue
 
 import java.lang.{Long => JLong}
@@ -71,11 +69,6 @@ abstract class HashAggregateExecTransformer(
     TransformContext(childCtx.outputAttributes, output, relNode)
   }
 
-  override def doTransform(context: SQL2FPGAContext): SQL2FPGATransformContext = {
-    val childCtx = child.asInstanceOf[TransformSupport].doTransform(context)
-    val root = new SQL2FPGA_QPlan
-    SQL2FPGATransformContext(childCtx.outputAttributes, output, root)
-  }
 
   override protected def checkAggFuncModeSupport(
       aggFunc: AggregateFunction,

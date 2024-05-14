@@ -364,6 +364,45 @@ JNIEXPORT void JNICALL Java_org_apache_gluten_vectorized_PlanEvaluatorJniWrapper
   JNI_METHOD_END()
 }
 
+JNIEXPORT jobject JNICALL Java_sfu_ca_hiaccel_JNIWrapper_nativeCreateFPGAKernelWithIterator(JNIEnv *env, jobject wrapper, jstring kernelName, jstring libraryName, jobjectArray iterArr) {
+    JNI_METHOD_START
+    auto ctx = gluten::getRuntime(env, wrapper);
+
+    // Convert Java strings to C++ strings
+    auto kernelNameStr = env->GetStringUTFChars(kernelName, nullptr);
+    auto libraryNameStr = env->GetStringUTFChars(libraryName, nullptr);
+    auto kernel = std::make_unique<Kernel>(kernelNameStr, libraryNameStr, nullptr, nullptr);
+
+    jsize itersLen = env->GetArrayLength(iterArr);
+    std::vector<std::shared_ptr<ResultIterator>> inputIters;
+    for (int idx = 0; idx < itersLen; idx++) {
+        jobject iter = env->GetObjectArrayElement(iterArr, idx);
+        auto arrayIter = makeJniColumnarBatchIterator(env, iter, ctx, nullptr);
+        while (true) {
+          auto batch = arrayIter->next();
+          if (!batch) {
+            break;
+          }
+          
+        }
+    } 
+
+    kernel->enqueueBatches({batch1}, 0);
+    if (kernelNameStr == "gqeJoin") {
+      kernel->enqueueBatches({batch2}, 1);
+    }
+
+    kernel->Init();
+    kernel->Run();
+
+    auto resultIterator = kernel->getResultIterator();
+
+    return ctx->objectStore()->save(resultIterator);
+
+    JNI_METHOD_END()   
+}
+
+
 JNIEXPORT jlong JNICALL
 Java_org_apache_gluten_vectorized_PlanEvaluatorJniWrapper_nativeCreateKernelWithIterator( // NOLINT
     JNIEnv* env,

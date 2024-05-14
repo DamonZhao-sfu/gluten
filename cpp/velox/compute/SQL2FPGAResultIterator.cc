@@ -51,17 +51,7 @@ void offload(void* handle, const std::vector<std::shared_ptr<ResultIterator>>& i
       std::cerr << "Error finding function " << "offload" << ": " << dlerror() << std::endl;
       return;
   }
-
-  for (auto iter : inputs) {
-    while(iter->hasNext()) {
-      auto batch = iter->next();
-      std::shared_ptr<ArrowSchema> schema = batch->exportArrowSchema();
-      std::shared_ptr<ArrowArray> array = batch->exportArrowArray();
-      auto rb = arrow::ImportRecordBatch(array.get(), schema.get());
-    }
-  }
-
-  (*offloadPtr)(inputs);
+  (*offloadPtr)(inputs); 
 }
 
 SQL2FPGAResultIterator::SQL2FPGAResultIterator(
@@ -71,23 +61,47 @@ SQL2FPGAResultIterator::SQL2FPGAResultIterator(
   // TODO: load the .so if generated, skip if already loaded
   nativeFuncHandle_ = loadLibrary("/localhdd/hza215/gluten/SQL2FPGA/libsql2fpga.so");
 
-  offload(nativeFuncHandle_, inputs);
+  auto context = std::make_unique<SQL2FPGA::Context>();
+
+  for (auto iter : inputs) {
+    std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+    while(iter->hasNext()) {
+      auto batch = iter->next();
+      std::shared_ptr<ArrowSchema> schema = batch->exportArrowSchema();
+      std::shared_ptr<ArrowArray> array = batch->exportArrowArray();
+      auto rb = gluten::arrowGetOrThrow(arrow::ImportRecordBatch(array.get(), schema.get()));
+      batches.push_back(rb);
+    }
+    context->enqueueBatches(batches);
+  }
+
+  kernel_ = std::make_unique<SQL2FPGA::Kernel>(context, "gqeJoin");
+  // Reset the kernel.
+  kernel_->Reset();
+
+  // Start the kernel.
+  kernel_->Start();
+
+  // Wait for the kernel to finish.
+  kernel_->WaitForFinish();
+
+  readIterator_ = kernel_->getResultIterator();
 
 }
 
 
 std::shared_ptr<ColumnarBatch> SQL2FPGAResultIterator::next() {
-  waitForFinish(nativeFuncHandle_);
-  // WAIT UNTIL KERNEL FINISHES
-  auto startTime = std::chrono::steady_clock::now();
-  auto batch = getNextBatch(nativeFuncHandle_);
-  //DLOG(INFO) << "FPGAIterator get a batch, num rows: " << (batch ? batch->num_rows() : 0);
-  collectBatchTime_ +=
-      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - startTime).count();
-  if (batch == nullptr) {
-    return nullptr;
+
+  if (readIterator_->HasNext()) {
+    auto startTime = std::chrono::steady_clock::now();
+    auto batch = readIterator_->Next();
+    collectBatchTime_ += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - startTime).count();
+    if (batch == nullptr) {
+        return nullptr;
+    }
+    return std::make_shared<gluten::ArrowColumnarBatch>(batch);
   }
-  return std::make_shared<gluten::ArrowColumnarBatch>(batch);
+  return nullptr;
 }
 
 int64_t SQL2FPGAResultIterator::spillFixedSize(int64_t size) {

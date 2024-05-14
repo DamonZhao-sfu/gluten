@@ -14,9 +14,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import java.io.{File, FileOutputStream, PrintStream}
+
 import org.apache.spark.sql.execution.debug._
 import scala.io.Source
 import java.io.File
+import java.io.PrintWriter
 import java.util.Arrays
 import sys.process._
 
@@ -31,14 +34,6 @@ var paq_file_root = "file://"
 var tpcds_queries_path = "/gluten-core/src/test/resources/tpcds-queries/"
 var queries_no_decimal = "tpcds.queries.no-decimal"
 var queries_original = "tpcds.queries.original"
-
-def time[R](block: => R): R = {
-  val t0 = System.nanoTime()
-  val result = block    // call-by-name
-  val t1 = System.nanoTime()
-  println("Elapsed time: " + (t1 - t0)/1000000000.0 + " seconds")
-  result
-}
 
 // Read TPC-DS Table from orc files.
 val call_center = spark.read.format("orc").load(paq_file_root + orc_file_path + "/call_center")
@@ -115,20 +110,41 @@ val sorted = fileLists.sortBy {
       str.toDouble
   }}
 
-// Main program to run TPC-H testing
-for (t <- sorted) {
-  println(t)
-  val fileContents = Source.fromFile(t).getLines.filter(!_.startsWith("--")).mkString(" ")
-  println(fileContents)
-  try {
-    //time{spark.sql(fileContents).show}
-    // spark.sql(fileContents).explain
-    //Thread.sleep(2000)
-  } catch {
-    case e: Exception => None
-  }
+
+
+def time[R](block: => R): Double = {
+  val t0 = System.nanoTime()
+  val result = block    // call-by-name
+  val t1 = System.nanoTime()
+  val elapsedTime = (t1 - t0) / 1e9
+  elapsedTime
 }
 
-spark.conf.set("spark.gluten.sql.enable.offloadtofpga", true)
+// Define a PrintWriter to write to a file
+val writer = new PrintWriter(s"query_times.txt")
 
-spark.conf.set("spark.gluten.sql2fpga.libpath", "/localhdd/hza215/gluten/SQL2FPGA/libsql2fpga.so")
+try {
+  // Main program to run TPC-H testing
+  for (t <- sorted) {
+    println(t)
+    val fileContents = Source.fromFile(t).getLines.filter(!_.startsWith("--")).mkString(" ")
+    println(fileContents)
+    try {
+      val elapsedTime = time {
+        spark.sql(fileContents).show
+      }
+      // Write query time to file along with query details
+      writer.println(t)
+      writer.println(s"Query: $fileContents")
+      writer.println(s"Elapsed time: $elapsedTime seconds\n")
+      
+    } catch {
+      case e: Exception => None
+    }
+  }
+} finally {
+  // Close the PrintWriter
+  writer.close()
+}
+//spark.conf.set("spark.gluten.sql.enable.offloadtofpga", true)
+//spark.conf.set("spark.gluten.sql2fpga.libpath", "/localhdd/hza215/gluten/SQL2FPGA/libsql2fpga.so")

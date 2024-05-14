@@ -53,6 +53,8 @@ class SQL2FPGAResultIterator : public ColumnarBatchIterator {
   std::unordered_map<std::string, std::string>& confMap_;
   void* nativeFuncHandle_;
 
+  SQL2FPGA::Kernel kernel_;
+
   static const int kDefaultDlopenFlags = RTLD_LOCAL | RTLD_LAZY;
 };
 

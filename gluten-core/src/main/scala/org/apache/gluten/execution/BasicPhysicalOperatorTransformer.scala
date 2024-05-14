@@ -34,8 +34,6 @@ import org.apache.spark.sql.execution.datasources.v2.{BatchScanExec, FileScan}
 import org.apache.spark.sql.utils.StructTypeFWD
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-import sfu.ca.hiaccel.{SQL2FPGA_QPlan, SQL2FPGAContext}
-
 import scala.collection.JavaConverters._
 
 abstract class FilterExecTransformerBase(val cond: Expression, val input: SparkPlan)
@@ -206,12 +204,6 @@ case class ProjectExecTransformer private (projectList: Seq[NamedExpression], ch
       getRelNode(context, projectList, child.output, operatorId, childCtx.root, validation = false)
     assert(currRel != null, "Project Rel should be valid")
     TransformContext(childCtx.outputAttributes, output, currRel)
-  }
-
-  override def doTransform(context: SQL2FPGAContext): SQL2FPGATransformContext = {
-    val childCtx = child.asInstanceOf[TransformSupport].doTransform(context)
-    val root = new SQL2FPGA_QPlan
-    SQL2FPGATransformContext(childCtx.outputAttributes, output, root)
   }
 
   override def output: Seq[Attribute] = projectList.map(_.toAttribute)
