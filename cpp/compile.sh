@@ -145,7 +145,7 @@ if [ -d build ]; then
 fi
 mkdir build
 cd build
-/localhdd/hza215/bin/bin/cmake .. \
+/localhdd/hza214/bin/bin/cmake .. \
   -DBUILD_TESTS=${BUILD_TESTS} \
   -DBUILD_EXAMPLES=${BUILD_EXAMPLES} \
   -DBUILD_JEMALLOC=${BUILD_JEMALLOC} \

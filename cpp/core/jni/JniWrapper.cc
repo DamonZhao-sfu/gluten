@@ -364,7 +364,7 @@ JNIEXPORT void JNICALL Java_org_apache_gluten_vectorized_PlanEvaluatorJniWrapper
   JNI_METHOD_END()
 }
 
-JNIEXPORT jobject JNICALL Java_sfu_ca_hiaccel_JNIWrapper_nativeCreateFPGAKernelWithIterator(JNIEnv *env, jobject wrapper, jstring kernelName, jstring libraryName, jobjectArray iterArr) {
+/*JNIEXPORT jobject JNICALL Java_sfu_ca_hiaccel_JNIWrapper_nativeCreateFPGAKernelWithIterator(JNIEnv *env, jobject wrapper, jstring kernelName, jstring libraryName, jobjectArray iterArr) {
     JNI_METHOD_START
     auto ctx = gluten::getRuntime(env, wrapper);
 
@@ -400,7 +400,7 @@ JNIEXPORT jobject JNICALL Java_sfu_ca_hiaccel_JNIWrapper_nativeCreateFPGAKernelW
     return ctx->objectStore()->save(resultIterator);
 
     JNI_METHOD_END()   
-}
+}*/
 
 
 JNIEXPORT jlong JNICALL

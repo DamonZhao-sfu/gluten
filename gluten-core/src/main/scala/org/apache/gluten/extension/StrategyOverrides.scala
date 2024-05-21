@@ -16,12 +16,12 @@
  */
 package org.apache.gluten.extension
 
-import io.glutenproject.{GlutenConfig, GlutenSparkExtensionsInjector}
-import io.glutenproject.backendsapi.BackendsApiManager
-import io.glutenproject.extension.columnar.TRANSFORM_UNSUPPORTED
-import io.glutenproject.extension.columnar.TransformHints.TAG
-import io.glutenproject.utils.LogicalPlanSelector
-import io.glutenproject.vectorized.JniLibLoader
+import org.apache.gluten.{GlutenConfig, GlutenSparkExtensionsInjector}
+import org.apache.gluten.backendsapi.BackendsApiManager
+import org.apache.gluten.extension.columnar.TRANSFORM_UNSUPPORTED
+import org.apache.gluten.extension.columnar.TransformHints.TAG
+import org.apache.gluten.utils.LogicalPlanSelector
+import org.apache.gluten.vectorized.JniLibLoader
 
 import org.apache.spark.sql.{SparkSession, SparkSessionExtensions, Strategy}
 import org.apache.spark.sql.catalyst.SQLConfHelper
@@ -33,7 +33,7 @@ import org.apache.spark.sql.execution.{joins, JoinSelectionShim, SparkPlan}
 import org.apache.spark.sql.execution.adaptive.{BroadcastQueryStageExec, LogicalQueryStage}
 import org.apache.spark.sql.execution.joins.BroadcastHashJoinExec
 
-import sfu.ca.hiaccel.{SQL2FPGA_Codegen, SQL2FPGA_QConfig, SQL2FPGA_QParser, SQL2FPGA_Linker, JNIWrapper}
+import sfu.ca.hiaccel.{SQL2FPGA_Codegen, SQL2FPGA_QConfig, SQL2FPGA_QParser, SQL2FPGA_Linker}
 
 
 object StrategyOverrides extends GlutenSparkExtensionsInjector {
@@ -95,13 +95,13 @@ case class SQL2FPGAOverrides(session: SparkSession) extends Strategy {
           val libPath = GlutenConfig.getConf.sql2fpgaLibPath
           linker.compileCppToSharedLibrary(queryNo, qConfig, libPath)
           JniLibLoader.loadFromPath(libPath, false)
-          val wrapper = new SQL2FPGAJNIWrapper
-          wrapper.runQuery(Array("-xclbin", "/localhdd/hza215/Vitis_Libraries/database/L2/demos/build_join_partition/xclbin_xilinx_u280_xdma_201920_3_hw/gqe_join.xclbin",
+          //val wrapper = new SQL2FPGAJNIWrapper
+          /*wrapper.runQuery(Array("-xclbin", "/localhdd/hza215/Vitis_Libraries/database/L2/demos/build_join_partition/xclbin_xilinx_u280_xdma_201920_3_hw/gqe_join.xclbin",
           "-xclbin_a", "/localhdd/hza215/Vitis_Libraries/database/L2/demos/build_aggr_partition/xclbin_xilinx_u280_xdma_201920_3_hw/gqe_aggr.xclbin",
           "-xclbin_h", "/localhdd/hza215/Vitis_Libraries/database/L2/demos/build_join_partition/xclbin_xilinx_u280_xdma_201920_3_hw/gqe_join.xclbin",
           "-in", "/localhdd/hza215/spark_benchmark/tpcds/orc",
           "-c", "1",
-          "-p","16"))
+          "-p","16"))*/
         }
         case _ => {
 
@@ -110,7 +110,7 @@ case class SQL2FPGAOverrides(session: SparkSession) extends Strategy {
 
       
       // get the sql2fpga plan to see whether it's allocated to CPU or FPGA
-      var nodeName = plan.nodeName
+      /*var nodeName = plan.nodeName
       //   this_node._nodeType == "JOIN_INNER" || this_node._nodeType == "JOIN_LEFTANTI" ||
       //      this_node._nodeType == "JOIN_LEFTSEMI" || this_node._nodeType == "JOIN_LEFTOUTER" || this_node._nodeType == "JOIN_FULLOUTER"
       if (nodeName == "Aggregate") {
@@ -121,7 +121,7 @@ case class SQL2FPGAOverrides(session: SparkSession) extends Strategy {
           val joinPhysicalPlan = planLater(plan)
           FPGAJoinExec(joinPhysicalPlan)
           tagNotTransformable(plan, "offloaded to fpga")
-      }
+      }*/
     }
     Nil
   }

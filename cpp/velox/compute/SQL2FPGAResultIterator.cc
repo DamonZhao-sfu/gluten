@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-#include <arrow/ipc/api.h>
+/*#include <arrow/ipc/api.h>
 
 #include "WholeStageResultIterator.h"
 #include "VeloxBackend.h"
@@ -108,4 +108,4 @@ int64_t SQL2FPGAResultIterator::spillFixedSize(int64_t size) {
   return 0;
 }
 
-} // namespace gluten
+} // namespace gluten*/

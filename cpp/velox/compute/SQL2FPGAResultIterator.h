@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#pragma once
+/*#pragma once
 
 #include "compute/Runtime.h"
 #include "iceberg/IcebergPlanConverter.h"
@@ -59,3 +59,4 @@ class SQL2FPGAResultIterator : public ColumnarBatchIterator {
 };
 
 } // namespace gluten
+*/

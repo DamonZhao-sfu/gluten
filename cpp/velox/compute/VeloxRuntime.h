@@ -18,7 +18,7 @@
 #pragma once
 
 #include "WholeStageResultIterator.h"
-#include "SQL2FPGAResultIterator.h"
+//#include "SQL2FPGAResultIterator.h"
 #include "compute/Runtime.h"
 #include "memory/VeloxMemoryManager.h"
 #include "operators/serializer/VeloxColumnarBatchSerializer.h"

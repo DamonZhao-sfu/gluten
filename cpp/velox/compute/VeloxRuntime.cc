@@ -142,7 +142,7 @@ std::shared_ptr<ResultIterator> VeloxRuntime::createResultIterator(
 
   auto* vmm = toVeloxMemoryManager(memoryManager);
   std::string offloadtofpga = "";
-  if (sessionConf.find("spark.gluten.sql.enable.offloadtofpga") != sessionConf.end()) {
+  /*if (sessionConf.find("spark.gluten.sql.enable.offloadtofpga") != sessionConf.end()) {
     offloadtofpga = sessionConf.at("spark.gluten.sql.enable.offloadtofpga");
     // only when .so file is generated
     // val libPath = "/localhdd/hza215/gluten/SQL2FPGA/libsql2fpga.so"
@@ -153,7 +153,7 @@ std::shared_ptr<ResultIterator> VeloxRuntime::createResultIterator(
         return std::make_shared<ResultIterator>(std::move(sql2fpgaIter), this);
       }
     }
-  }
+  }*/
   auto wholestageIter = std::make_unique<WholeStageResultIterator>(
       vmm, veloxPlan_, scanIds, scanInfos, streamIds, spillDir, sessionConf, taskInfo_);
   return std::make_shared<ResultIterator>(std::move(wholestageIter), this);

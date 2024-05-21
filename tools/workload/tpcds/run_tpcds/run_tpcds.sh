@@ -13,24 +13,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-GLUTEN_JAR=/PATH_TO_GLUTEN_HOME/package/target/<gluten-jar>
-SPARK_HOME=/PATH_TO_SPARK_HOME/
-
-cat tpcds_parquet.scala | ${SPARK_HOME}/bin/spark-shell \
-  --master yarn --deploy-mode client \
-  --conf spark.plugins=org.apache.gluten.GlutenPlugin \
-  --conf spark.driver.extraClassPath=${GLUTEN_JAR} \
-  --conf spark.executor.extraClassPath=${GLUTEN_JAR} \
+export CXX=$(conda info --root)/envs/velox-build/bin/x86_64-conda-linux-gnu-g++
+export CC=$(conda info --root)/envs/velox-build/bin/x86_64-conda-linux-gnu-gcc
+export LD_LIBRARY_PATH=$(conda info --root)/envs/velox-build/lib:$LD_LIBRARY_PATH
+export CPATH=$(conda info --root)/envs/velox-build/include
+export SPARK_LOCAL_DIRS=/mnt/glusterfs/users/hza214/tmp
+export GLUTEN_JAR=/localhdd/hza214/spark/spark-3.2.2-bin-hadoop2.7/jars/gluten-package-1.2.0-SNAPSHOT.jar 
+#--conf spark.plugins=org.apache.gluten.GlutenPlugin \
+  #--conf spark.driver.extraClassPath=${GLUTEN_JAR} \
+  #--conf spark.executor.extraClassPath=${GLUTEN_JAR} \
+    #--conf spark.gluten.sql.columnar.forceShuffledHashJoin=true \
+  
+  
+#--conf spark.plugins=org.apache.gluten.GlutenPlugin \
+cat tpcds_orc.scala |  /localhdd/hza214/spark/spark-3.2.2-bin-hadoop2.7/bin/spark-shell \
+  --conf spark.plugins=org.apache.gluten.GlutenPlugin\
   --conf spark.memory.offHeap.enabled=true \
-  --conf spark.memory.offHeap.size=2g \
-  --conf spark.gluten.sql.columnar.forceShuffledHashJoin=true \
+  --conf spark.memory.offHeap.size=160g \
+  --conf spark.sql.adaptive.enabled=false \
+  --conf spark.local.dir=/mnt/glusterfs/users/hza214/tmp \
   --conf spark.shuffle.manager=org.apache.spark.shuffle.sort.ColumnarShuffleManager \
-  --num-executors 3 \
-  --executor-cores 3 \
-  --driver-memory 2g \
-  --executor-memory 2g \
-  --conf spark.executor.memoryOverhead=2g \
-  --conf spark.driver.maxResultSize=2g
+  --num-executors 40 \
+  --executor-cores 40 \
+  --driver-memory 128g \
+  --executor-memory 128g \
+  --conf spark.gluten.sql.injectNativePlanStringToExplain=true\
+  --conf spark.gluten.sql.debug=true\
+  --conf spark.gluten.shuffleWriter.bufferSize=8192\
+  --conf spark.executor.memoryOverhead=160g \
+  --conf spark.driver.maxResultSize=32g &
 
   # If there are some "*.so" libs dependencies issues on some specific Distros,
   # try to enable spark.gluten.loadLibFromJar and build your own gluten-thirdparty-lib Jar.
