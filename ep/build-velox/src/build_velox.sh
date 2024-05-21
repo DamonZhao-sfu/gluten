@@ -37,14 +37,6 @@ RUN_SETUP_SCRIPT=ON
 COMPILE_ARROW_JAVA=ON
 NUM_THREADS=""
 OTHER_ARGUMENTS=""
-
-export CXX=$(conda info --root)/envs/velox-build/bin/x86_64-conda-linux-gnu-g++
-export CC=$(conda info --root)/envs/velox-build/bin/x86_64-conda-linux-gnu-gcc
-export LD_LIBRARY_PATH=$(conda info --root)/envs/velox-build/lib:$LD_LIBRARY_PATH
-export CPATH=$(conda info --root)/envs/velox-build/include
-export CXXFLAGS="-DFOLLY_HAVE_SO_TIMESTAMPING=0"
-
-
 OS=`uname -s`
 ARCH=`uname -m`
 
@@ -110,6 +102,16 @@ for arg in "$@"; do
 done
 
 function compile {
+  if [ -z "${GLUTEN_VCPKG_ENABLED:-}" ] && [ $RUN_SETUP_SCRIPT == "ON" ]; then
+    if [ $OS == 'Linux' ]; then
+      setup_linux
+    elif [ $OS == 'Darwin' ]; then
+      setup_macos
+    else
+      echo "Unsupported kernel: $OS"
+      exit 1
+    fi
+  fi
 
   CXX_FLAGS='-Wno-missing-field-initializers'
   COMPILE_OPTION="-DCMAKE_CXX_FLAGS=\"$CXX_FLAGS\" -DVELOX_ENABLE_PARQUET=ON -DVELOX_BUILD_TESTING=OFF"
@@ -164,17 +166,17 @@ function compile {
     if [ -d xsimd-build ]; then
       echo "INSTALL xsimd."
       if [ $OS == 'Linux' ]; then
-        cmake --install xsimd-build/ --prefix /localhdd/hza215/conda/envs/velox-build/
+        cmake --install xsimd-build/ --prefix /localhdd/hza214/conda/envs/velox-build/
       elif [ $OS == 'Darwin' ]; then
-        sudo cmake --install xsimd-build/
+        cmake --install xsimd-build/
       fi
     fi
     if [ -d gtest-build ]; then
       echo "INSTALL gtest."
       if [ $OS == 'Linux' ]; then
-        cmake --install gtest-build/ --prefix /localhdd/hza215/conda/envs/velox-build/
+        cmake --install gtest-build/ --prefix /localhdd/hza214/conda/envs/velox-build/
       elif [ $OS == 'Darwin' ]; then
-        sudo cmake --install gtest-build/
+        cmake --install gtest-build/
       fi
     fi
   fi
@@ -206,7 +208,7 @@ function check_commit {
     fi
   else
     # Branch-new build requires all untracked files to be deleted. We only need the source code.
-    sudo git clean -dffx :/
+    git clean -dffx :/
   fi
 
   if [ -f ${VELOX_HOME}/velox-build.cache ]; then
@@ -279,6 +281,7 @@ function compile_arrow_java_module() {
     ARROW_INSTALL_DIR="${ARROW_HOME}/../../install"
 
     pushd $ARROW_HOME/java
+    
     mvn clean install -pl maven/module-info-compiler-maven-plugin -am \
           -Dmaven.test.skip -Drat.skip -Dmaven.gitcommitid.skip -Dcheckstyle.skip
 
@@ -286,9 +289,15 @@ function compile_arrow_java_module() {
     mvn generate-resources -P generate-libs-cdata-all-os -Darrow.c.jni.dist.dir=$ARROW_INSTALL_DIR \
       -Dmaven.test.skip -Drat.skip -Dmaven.gitcommitid.skip -Dcheckstyle.skip -N
 
+    # Arrow JNI Date Interface CPP libraries
+    export PKG_CONFIG_PATH=/usr/local/lib64/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}
+    mvn generate-resources -Pgenerate-libs-jni-macos-linux -N -Darrow.dataset.jni.dist.dir=$ARROW_INSTALL_DIR \
+      -DARROW_GANDIVA=OFF -DARROW_JAVA_JNI_ENABLE_GANDIVA=OFF -DARROW_ORC=OFF -DARROW_JAVA_JNI_ENABLE_ORC=OFF \
+	    -Dmaven.test.skip -Drat.skip -Dmaven.gitcommitid.skip -Dcheckstyle.skip -N
+
     # Arrow Java libraries
-    mvn clean install -P arrow-c-data -pl c -am -DskipTests -Dcheckstyle.skip \
-      -Darrow.c.jni.dist.dir=$ARROW_INSTALL_DIR/lib \
+    mvn clean install  -Parrow-jni -P arrow-c-data -pl dataset,c -am \
+      -Darrow.c.jni.dist.dir=$ARROW_INSTALL_DIR/lib -Darrow.dataset.jni.dist.dir=$ARROW_INSTALL_DIR/lib -Darrow.cpp.build.dir=$ARROW_INSTALL_DIR/lib \
       -Dmaven.test.skip -Drat.skip -Dmaven.gitcommitid.skip -Dcheckstyle.skip
     popd
 }

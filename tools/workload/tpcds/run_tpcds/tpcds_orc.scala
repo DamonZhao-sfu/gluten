@@ -22,10 +22,9 @@ import java.io.File
 import java.io.PrintWriter
 import java.util.Arrays
 import sys.process._
-
 // Configurations:
-var orc_file_path = "/localhdd/hza215/spark_benchmark/tpcds/orc"
-var gluten_root = "/localhdd/hza215/gluten"
+var orc_file_path = "/mnt/glusterfs/users/hza214/orc_1T"
+var gluten_root = "/localhdd/hza214/gluten"
 
 // File root path: file://, hdfs:// , s3 , ...
 // e.g. hdfs://hostname:8020
@@ -120,15 +119,18 @@ def time[R](block: => R): Double = {
   elapsedTime
 }
 
-// Define a PrintWriter to write to a file
-val writer = new PrintWriter(s"query_times.txt")
 
+// Define a PrintWriter to write to a file
 try {
-  // Main program to run TPC-H testing
   for (t <- sorted) {
     println(t)
     val fileContents = Source.fromFile(t).getLines.filter(!_.startsWith("--")).mkString(" ")
     println(fileContents)
+    
+    val fileName = t.toString.split("/").last
+    val queryIdentifier = fileName.split("\\.")(0) // This will give you 'q1', 'q2', 'q23a', etc.
+    
+    val writer = new PrintWriter(s"/localhdd/hza214/gluten/tools/workload/tpcds/run_tpcds/query_times$queryIdentifier.txt")
     try {
       val elapsedTime = time {
         spark.sql(fileContents).show
@@ -137,14 +139,16 @@ try {
       writer.println(t)
       writer.println(s"Query: $fileContents")
       writer.println(s"Elapsed time: $elapsedTime seconds\n")
-      
     } catch {
-      case e: Exception => None
+      case e: Exception => 
+        e.printStackTrace()
+        println(s"Error processing file $t: ${e.getMessage}")
+    } finally {
+      writer.close()
     }
   }
 } finally {
-  // Close the PrintWriter
-  writer.close()
+  // Any necessary final cleanup can go here
 }
 //spark.conf.set("spark.gluten.sql.enable.offloadtofpga", true)
 //spark.conf.set("spark.gluten.sql2fpga.libpath", "/localhdd/hza215/gluten/SQL2FPGA/libsql2fpga.so")
