@@ -130,7 +130,7 @@ try {
     val fileName = t.toString.split("/").last
     val queryIdentifier = fileName.split("\\.")(0) // This will give you 'q1', 'q2', 'q23a', etc.
     
-    val writer = new PrintWriter(s"/localhdd/hza214/gluten/tools/workload/tpcds/run_tpcds/query_times$queryIdentifier.txt")
+    val writer = new PrintWriter(s"/localhdd/hza214/gluten/tools/workload/tpcds/run_tpcds/query_times_$queryIdentifier.txt")
     try {
       val elapsedTime = time {
         spark.sql(fileContents).show
