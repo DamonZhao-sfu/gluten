@@ -17,8 +17,8 @@
 #export CC=$(conda info --root)/envs/velox-build/bin/x86_64-conda-linux-gnu-gcc
 #export LD_LIBRARY_PATH=$(conda info --root)/envs/velox-build/lib:$LD_LIBRARY_PATH
 #export CPATH=$(conda info --root)/envs/velox-build/include
-export SPARK_LOCAL_DIRS=/mnt/glusterfs/users/hza214/tmp
-export GLUTEN_JAR=/localhdd/hza214/spark/spark-3.2.2-bin-hadoop2.7/jars/gluten-package-1.2.0-SNAPSHOT.jar 
+export SPARK_LOCAL_DIRS=/localssd/hza214/sparktmp
+#export GLUTEN_JAR=/localhdd/hza214/spark/spark-3.2.2-bin-hadoop2.7/jars/gluten-package-1.2.0-SNAPSHOT.jar 
 #--conf spark.plugins=org.apache.gluten.GlutenPlugin \
   #--conf spark.driver.extraClassPath=${GLUTEN_JAR} \
   #--conf spark.executor.extraClassPath=${GLUTEN_JAR} \
@@ -29,20 +29,19 @@ export GLUTEN_JAR=/localhdd/hza214/spark/spark-3.2.2-bin-hadoop2.7/jars/gluten-p
 #/localhdd/hza214/spark/spark-3.2.2-bin-hadoop2.7/bin/spark-shell   --conf spark.memory.offHeap.enabled=true   --conf spark.memory.offHeap.size=160g --conf spark.plugins=org.apache.gluten.GlutenPlugin   --conf spark.sql.adaptive.enabled=true    --conf spark.local.dir=/mnt/glusterfs/users/hza214/tmp   --conf spark.shuffle.manager=org.apache.spark.shuffle.sort.ColumnarShuffleManager   --num-executors 48   --executor-cores 48   --driver-memory 128g   --executor-memory 128g   --conf spark.gluten.sql.injectNativePlanStringToExplain=true  --conf spark.gluten.sql.debug=true  --conf spark.executor.memoryOverhead=160g   --conf spark.driver.maxResultSize=32g --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --jars /localhdd/hza214/spark-tera sort/target/spark-terasort-1.2-SNAPSHOT-jar-with-dependencies.jar
 
 #--conf spark.plugins=org.apache.gluten.GlutenPlugin \
+  #--conf spark.gluten.sql.injectNativePlanStringToExplain=true\
+  #--conf spark.gluten.sql.debug=true\
 cat tpcds_orc.scala |  /localhdd/hza214/spark/bin/spark-shell \
   --conf spark.memory.offHeap.enabled=true \
-  --conf spark.memory.offHeap.size=160g \
+  --conf spark.memory.offHeap.size=30g \
   --conf spark.sql.adaptive.enabled=true \
-  --conf spark.local.dir=/mnt/glusterfs/users/hza214/tmp \
+  --conf spark.local.dir=/localssd/hza214/sparktmp \
   --conf spark.shuffle.manager=org.apache.spark.shuffle.sort.ColumnarShuffleManager \
   --num-executors 48 \
   --executor-cores 48 \
-  --driver-memory 128g \
-  --executor-memory 128g \
-  --conf spark.gluten.sql.injectNativePlanStringToExplain=true\
-  --conf spark.gluten.sql.debug=true\
-  --conf spark.executor.memoryOverhead=160g \
-  --conf spark.driver.maxResultSize=32g &
+  --driver-memory 140g \
+  --executor-memory 140g \
+  --conf spark.executor.memoryOverhead=10g &
 
   # If there are some "*.so" libs dependencies issues on some specific Distros,
   # try to enable spark.gluten.loadLibFromJar and build your own gluten-thirdparty-lib Jar.
