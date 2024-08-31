@@ -1,0 +1,8 @@
+/localhdd/hza214/gluten/cpp/velox/benchmarks/build/CMakeFiles/velox_benchmark_common.dir
+/localhdd/hza214/gluten/cpp/velox/benchmarks/build/CMakeFiles/generic_benchmark.dir
+/localhdd/hza214/gluten/cpp/velox/benchmarks/build/CMakeFiles/columnar_to_row_benchmark.dir
+/localhdd/hza214/gluten/cpp/velox/benchmarks/build/CMakeFiles/parquet_write_benchmark.dir
+/localhdd/hza214/gluten/cpp/velox/benchmarks/build/CMakeFiles/plan_validator_util.dir
+/localhdd/hza214/gluten/cpp/velox/benchmarks/build/CMakeFiles/shuffle_split_benchmark.dir
+/localhdd/hza214/gluten/cpp/velox/benchmarks/build/CMakeFiles/edit_cache.dir
+/localhdd/hza214/gluten/cpp/velox/benchmarks/build/CMakeFiles/rebuild_cache.dir

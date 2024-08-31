@@ -1,0 +1,2 @@
+/localhdd/hza215/conda/envs/velox-build/bin/x86_64-conda-linux-gnu-ar qc libvelox_benchmark_common.a CMakeFiles/velox_benchmark_common.dir/common/FileReaderIterator.o CMakeFiles/velox_benchmark_common.dir/common/BenchmarkUtils.o
+/localhdd/hza215/conda/envs/velox-build/bin/x86_64-conda-linux-gnu-ranlib libvelox_benchmark_common.a

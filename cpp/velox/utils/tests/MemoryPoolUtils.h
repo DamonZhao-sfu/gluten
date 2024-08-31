@@ -21,7 +21,6 @@
 #include "memory/Reclaimable.h"
 #include "utils/exception.h"
 #include "velox/common/base/Exceptions.h"
-
 namespace gluten {
 
 /**

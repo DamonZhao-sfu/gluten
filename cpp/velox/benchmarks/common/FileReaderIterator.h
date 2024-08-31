@@ -19,6 +19,7 @@
 #include <arrow/io/api.h>
 #include <arrow/record_batch.h>
 #include <arrow/util/range.h>
+#include <arrow/adapters/orc/adapter.h>
 
 #include "BenchmarkUtils.h"
 #include "compute/ResultIterator.h"

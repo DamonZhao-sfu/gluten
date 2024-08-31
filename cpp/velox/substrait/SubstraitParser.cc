@@ -18,7 +18,6 @@
 #include "SubstraitParser.h"
 #include "TypeUtils.h"
 #include "velox/common/base/Exceptions.h"
-
 #include "VeloxSubstraitSignature.h"
 
 namespace gluten {
