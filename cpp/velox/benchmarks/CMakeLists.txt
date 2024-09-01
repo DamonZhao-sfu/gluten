@@ -30,20 +30,16 @@ message(STATUS "OpenCL_LIBRARIES: ${OpenCL_LIBRARIES}")
 
 # to include CL
 include_directories(/localhdd/hza214/CL-lib) 
-include_directories(/localhdd/hza214/arrow-lib/include)
-include_directories(/localhdd/hza214/orc/ORC-1.9.0-SNAPSHOT-Linux/include)
+include_directories(/localhdd/hza214/arrow-lib2/include)
+include_directories(/localhdd/hza214/orc-lib/orc/build/ORC-2.1.0-SNAPSHOT-Linux/include)
 include_directories(/localhdd/hza214/2020.2/include)
 include_directories(/opt/xilinx/xrt/include)
-include_directories(/localhdd/hza215/conda/envs/velox-build/include)
 
 # Link directory where Arrow and Parquet libraries are located
-link_directories(/localhdd/hza214/arrow-lib/lib)
-link_directories(/localhdd/hza214/orc/ORC-1.9.0-SNAPSHOT-Linux/lib)
+link_directories(/localhdd/hza214/arrow-lib2/lib)
 link_directories(/localhdd/hza214/2020.2/lib)
 link_directories(/opt/xilinx/xrt/lib)
-link_directories(/usr/lib)
-link_directories(/localhdd/hza215/conda/envs/velox-build/lib)
-link_directories("/usr/lib/x86_64-linux-gnu")
+link_directories(/localhdd/hza214/orc-lib/orc/build/ORC-2.1.0-SNAPSHOT-Linux/lib)
 
 #find_arrow_lib(${PARQUET_LIB_NAME})
 set(ORC_LIBRARIES orc protobuf zstd snappy lz4 pthread z)
@@ -51,14 +47,14 @@ set(ORC_LIBRARIES orc protobuf zstd snappy lz4 pthread z)
 set(VELOX_BENCHMARK_COMMON_SRCS common/FileReaderIterator.cc common/BenchmarkUtils.cc)
 add_library(velox_benchmark_common STATIC ${VELOX_BENCHMARK_COMMON_SRCS})
 target_include_directories(velox_benchmark_common PUBLIC 
-${CMAKE_SOURCE_DIR}/velox ${CMAKE_SOURCE_DIR}/core /localhdd/hza214/arrow-lib/include 
-/localhdd/hza214/orc/ORC-1.9.0-SNAPSHOT-Linux/include /local-scratch/Xilinx/Vitis_HLS/2020.2/include
- /opt/xilinx/xrt/include /localhdd/hza215/conda/envs/velox-build/include /localhdd/hza214/CL-lib)
-target_link_libraries(velox_benchmark_common PUBLIC orc tinyxml rt gmp mpfr tapa frt glog gflags ${OpenCL_LIBRARIES} Arrow::arrow Arrow::parquet velox benchmark::benchmark google::glog)
+${CMAKE_SOURCE_DIR}/velox ${CMAKE_SOURCE_DIR}/core /localhdd/hza214/arrow-lib2/include 
+/localhdd/hza214/orc-lib/orc/build/ORC-2.1.0-SNAPSHOT-Linux/include /local-scratch/Xilinx/Vitis_HLS/2020.2/include
+ /opt/xilinx/xrt/include /localhdd/hza214/CL-lib)
+target_link_libraries(velox_benchmark_common PUBLIC tinyxml rt gmp mpfr tapa frt glog gflags ${OpenCL_LIBRARIES} /localhdd/hza214/arrow-lib2/lib/libarrow.a /localhdd/hza214/orc-lib/orc/build/ORC-2.1.0-SNAPSHOT-Linux/lib/liborc.a /localhdd/hza214/orc-lib/orc/build/ORC-2.1.0-SNAPSHOT-Linux/lib/libprotobuf.a velox benchmark::benchmark google::glog /localhdd/hza214/arrow-build/arrow/cpp/build-orc/jemalloc_ep-prefix/src/jemalloc_ep/lib/libjemalloc.a)
 
 function(add_velox_benchmark BM_EXEC BM_FILE)
   add_executable(${BM_EXEC} ${BM_FILE})
-  target_link_libraries(${BM_EXEC} PRIVATE velox_benchmark_common ${ORC_LIBRARIES} OpenCL::OpenCL /usr/lib/x86_64-linux-gnu/libOpenCL.so)
+  target_link_libraries(${BM_EXEC} PRIVATE velox_benchmark_common OpenCL::OpenCL /usr/lib/x86_64-linux-gnu/libOpenCL.so)
 endfunction()
 
 # Generic benchmark
