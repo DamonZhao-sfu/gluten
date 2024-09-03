@@ -420,7 +420,7 @@ int main(int argc, char** argv) {
   LOG(INFO) << "write_path: " << FLAGS_write_path;
 
   if (dataFiles.empty()) {
-    GENERIC_BENCHMARK("SkipInput", FileReaderType::kNone);
+    GENERIC_BENCHMARK("InputFromFPGAStream", FileReaderType::kfpga);
   } else {
     GENERIC_BENCHMARK("InputFromBatchVector", FileReaderType::kBuffered);
     GENERIC_BENCHMARK("InputFromBatchStream", FileReaderType::kStream);

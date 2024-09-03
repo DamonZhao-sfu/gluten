@@ -31,7 +31,7 @@ namespace gluten {
 static const std::string kOrcSuffix = ".orc";
 static const std::string kParquetSuffix = ".parquet";
 
-enum FileReaderType { kBuffered, kStream, kNone };
+enum FileReaderType { kBuffered, kStream, kfpga, kNone };
 
 class FileReaderIterator : public ColumnarBatchIterator {
  public:

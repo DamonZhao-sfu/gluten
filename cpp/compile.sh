@@ -22,7 +22,7 @@ BUILD_TESTS=OFF
 BUILD_EXAMPLES=OFF
 BUILD_BENCHMARKS=ON
 BUILD_JEMALLOC=OFF
-BUILD_PROTOBUF=ON
+BUILD_PROTOBUF=OFF
 ENABLE_QAT=OFF
 ENABLE_HBM=OFF
 ENABLE_GCS=OFF
@@ -116,9 +116,8 @@ CURRENT_DIR=$(
 
 export CXX=$(conda info --root)/envs/velox-build/bin/x86_64-conda-linux-gnu-g++
 export CC=$(conda info --root)/envs/velox-build/bin/x86_64-conda-linux-gnu-gcc
-export LD_LIBRARY_PATH=$(conda info --root)/envs/velox-build/lib:$LD_LIBRARY_PATH
-export CPATH=$(conda info --root)/envs/velox-build/include
-
+export LD_LIBRARY_PATH=$(conda info --root)/envs/velox-build/lib:/localhdd/hza214/protobuf/lib:$LD_LIBRARY_PATH
+export CPATH=$(conda info --root)/envs/velox-build/include:/localhdd/hza214/protobuf/include:$CPATH
 #gluten cpp will find velox lib from VELOX_HOME
 if [ "$VELOX_HOME" == "" ]; then
   VELOX_HOME="$CURRENT_DIR/../ep/build-velox/build/velox_ep"
@@ -160,6 +159,6 @@ cd build
   -DENABLE_S3=${ENABLE_S3} \
   -DENABLE_HDFS=${ENABLE_HDFS} \
   -DENABLE_ABFS=${ENABLE_ABFS} \
-  -DCMAKE_CXX_FLAGS="-I/localhdd/hza214/CL-lib"
+  -DCMAKE_CXX_FLAGS="-I/localhdd/hza214/CL-lib" \
   #-DCMAKE_EXE_LINKER_FLAGS="-lopencl" 
-make -j40 VERBOSE=1
+make -j40 VERBOSE=1 

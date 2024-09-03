@@ -14,7 +14,7 @@
 # limitations under the License.
 
 cmake_minimum_required(VERSION 3.16)
-
+include_directories("/localhdd/hza214/protobuf/include")
 project(velox)
 
 include(ExternalProject)

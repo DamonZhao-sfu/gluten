@@ -35,11 +35,15 @@ std::shared_ptr<gluten::ResultIterator> gluten::getInputIteratorFromFileReader(
     }
   } else if (suffix == kOrcSuffix) {
 #ifdef GLUTEN_ENABLE_ORC
+    std::cout << "reading file " << path << std::endl;
+    if (readerType == FileReaderType::kfpga) {
+      return std::make_shared<gluten::ResultIterator>(std::make_unique<FORCReaderIterator>(path));
+    }
     if (readerType == FileReaderType::kStream) {
-      return std::make_shared<gluten::ResultIterator>(std::make_unique<OrcStreamReaderIterator>(path));
+      return std::make_shared<gluten::ResultIterator>(std::make_unique<FORCReaderIterator>(path));
     }
     if (readerType == FileReaderType::kBuffered) {
-      return std::make_shared<gluten::ResultIterator>(std::make_unique<OrcBufferedReaderIterator>(path));
+      return std::make_shared<gluten::ResultIterator>(std::make_unique<FORCReaderIterator>(path));
     }
 #endif
   }

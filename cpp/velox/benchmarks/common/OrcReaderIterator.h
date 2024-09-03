@@ -18,6 +18,7 @@
 
 #include "benchmarks/common/FileReaderIterator.h"
 #include "benchmarks/common/FPGARecordBatchIterator.h"
+#include <errno.h>
 using namespace boost;
 
 namespace gluten {
@@ -36,10 +37,16 @@ void async_readnorm(struct aiocb* aio_rf, void* data_in, int Fd, int vector_size
     aio_rf->aio_fildes = Fd;
     aio_rf->aio_nbytes = vector_size_bytes;
     aio_rf->aio_offset = offset;
+    std::cout << aio_rf << std::endl;
+    std::cout << aio_rf->aio_buf << std::endl;
+    std::cout << aio_rf->aio_fildes << std::endl;
+    std::cout << aio_rf->aio_offset << std::endl;
+    std::cout << aio_rf->aio_nbytes << std::endl;
+
     int result = aio_read(aio_rf);
     if (result < 0)
     {
-        printf("Read Failed: %d \n", result);
+        printf("Read Failed: %s\n", strerror(errno));
     }
 }
 
@@ -127,7 +134,9 @@ class FORCReaderIterator final : public OrcReaderIterator {
     
     std::string nvme_file = path;
     nvmeFd = open(nvme_file.c_str(), O_RDONLY); //O_SYNC O_DIRECT  O_RDONLY  O_RDWR
-
+    if (nvmeFd < 0) {
+        std::cerr << "ERROR: open " << nvme_file << "failed: " << std::endl;
+    }
     uint32_t numberColumns = reader->getType().getMaximumColumnId() + 1;
     uint32_t nrows = reader->getNumberOfRows();
     uint32_t stripeCount = reader->getNumberOfStripes();
