@@ -33,16 +33,11 @@ void writeZeros(void* ptr, uint32_t offset, uint32_t size) {
 
 void async_readnorm(struct aiocb* aio_rf, void* data_in, int Fd, int vector_size_bytes, int offset)
 {
+    memset(aio_rf, 0, sizeof(*aio_rf));
     aio_rf->aio_buf = data_in;
     aio_rf->aio_fildes = Fd;
     aio_rf->aio_nbytes = vector_size_bytes;
     aio_rf->aio_offset = offset;
-    std::cout << aio_rf << std::endl;
-    std::cout << aio_rf->aio_buf << std::endl;
-    std::cout << aio_rf->aio_fildes << std::endl;
-    std::cout << aio_rf->aio_offset << std::endl;
-    std::cout << aio_rf->aio_nbytes << std::endl;
-
     int result = aio_read(aio_rf);
     if (result < 0)
     {
@@ -131,8 +126,8 @@ class FORCReaderIterator final : public OrcReaderIterator {
     orc::ReaderOptions readerOpts;
     std::unique_ptr<orc::Reader> reader =
         orc::createReader(orc::readFile(path, readerOpts.getReaderMetrics()), readerOpts);
-    
-    std::string nvme_file = path;
+    std::string filePath = path;
+    std::string nvme_file = filePath;
     nvmeFd = open(nvme_file.c_str(), O_RDONLY); //O_SYNC O_DIRECT  O_RDONLY  O_RDWR
     if (nvmeFd < 0) {
         std::cerr << "ERROR: open " << nvme_file << "failed: " << std::endl;
@@ -819,6 +814,8 @@ class FORCReaderIterator final : public OrcReaderIterator {
       return nullptr;
     }
     std::shared_ptr<arrow::RecordBatch> batch = maybe_batch.ValueOrDie();
+    DLOG(INFO) << "OrcFPGAIterator get a batch, num rows: " << (batch ? batch->num_rows() : 0);
+
     return convertBatch(std::make_shared<gluten::ArrowColumnarBatch>(batch));
   }
   private:
