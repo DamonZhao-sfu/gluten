@@ -43,20 +43,16 @@ namespace {
 const int32_t kGzipWindowBits4k = 12;
 }
 
-void VeloxParquetDatasource::init(const std::unordered_map<std::string, std::string>& sparkConfs) {
+void VeloxParquetDatasource::initSink(const std::unordered_map<std::string, std::string>& /* sparkConfs */) {
   if (strncmp(filePath_.c_str(), "file:", 5) == 0) {
     sink_ = dwio::common::FileSink::create(filePath_, {.pool = pool_.get()});
   } else {
     throw std::runtime_error("The file path is not local when writing data with parquet format in velox runtime!");
   }
+}
 
-  ArrowSchema cSchema{};
-  arrow::Status status = arrow::ExportSchema(*(schema_.get()), &cSchema);
-  if (!status.ok()) {
-    throw std::runtime_error("Failed to export arrow cSchema.");
-  }
-
-  type_ = velox::importFromArrow(cSchema);
+void VeloxParquetDatasource::init(const std::unordered_map<std::string, std::string>& sparkConfs) {
+  initSink(sparkConfs);
 
   if (sparkConfs.find(kParquetBlockSize) != sparkConfs.end()) {
     maxRowGroupBytes_ = static_cast<int64_t>(stoi(sparkConfs.find(kParquetBlockSize)->second));
@@ -65,7 +61,7 @@ void VeloxParquetDatasource::init(const std::unordered_map<std::string, std::str
     maxRowGroupRows_ = static_cast<int64_t>(stoi(sparkConfs.find(kParquetBlockRows)->second));
   }
   velox::parquet::WriterOptions writeOption;
-  writeOption.parquetWriteTimestampUnit = 6 /*micro*/;
+  writeOption.parquetWriteTimestampUnit = TimestampUnit::kMicro /*micro*/;
   auto compressionCodec = CompressionKind::CompressionKind_SNAPPY;
   if (sparkConfs.find(kParquetCompressionCodec) != sparkConfs.end()) {
     auto compressionCodecStr = sparkConfs.find(kParquetCompressionCodec)->second;
@@ -97,7 +93,7 @@ void VeloxParquetDatasource::init(const std::unordered_map<std::string, std::str
       compressionCodec = CompressionKind::CompressionKind_NONE;
     }
   }
-  writeOption.compression = compressionCodec;
+  writeOption.compressionKind = compressionCodec;
   writeOption.flushPolicyFactory = [&]() {
     return std::make_unique<velox::parquet::LambdaFlushPolicy>(
         maxRowGroupRows_, maxRowGroupBytes_, [&]() { return false; });
@@ -117,7 +113,7 @@ void VeloxParquetDatasource::inspectSchema(struct ArrowSchema* out) {
   std::shared_ptr<velox::ReadFile> readFile{fs->openFileForRead(filePath_)};
 
   std::unique_ptr<velox::dwio::common::Reader> reader =
-      velox::dwio::common::getReaderFactory(readerOptions.getFileFormat())
+      velox::dwio::common::getReaderFactory(readerOptions.fileFormat())
           ->createReader(
               std::make_unique<velox::dwio::common::BufferedInput>(
                   std::make_shared<velox::dwio::common::ReadFileInputStream>(readFile), *pool_.get()),

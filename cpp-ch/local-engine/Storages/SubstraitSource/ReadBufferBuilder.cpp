@@ -20,25 +20,25 @@
 #include <memory>
 #include <shared_mutex>
 #include <thread>
+#include <Core/Settings.h>
 #include <Disks/IO/AsynchronousBoundedReadBuffer.h>
 #include <Disks/IO/ReadBufferFromAzureBlobStorage.h>
 #include <Disks/IO/ReadBufferFromRemoteFSGather.h>
-#include <Disks/ObjectStorages/AzureBlobStorage/AzureBlobStorageAuth.h>
 #include <IO/BoundedReadBuffer.h>
 #include <IO/ReadBufferFromFile.h>
 #include <IO/ReadBufferFromS3.h>
 #include <IO/ReadSettings.h>
 #include <IO/S3/getObjectInfo.h>
 #include <IO/S3Common.h>
+#include <IO/S3Settings.h>
 #include <IO/SeekableReadBuffer.h>
 #include <Interpreters/Cache/FileCache.h>
 #include <Interpreters/Cache/FileCacheFactory.h>
 #include <Interpreters/Cache/FileCacheSettings.h>
-#include <Interpreters/Context_fwd.h>
-#include <Storages/HDFS/AsynchronousReadBufferFromHDFS.h>
-#include <Storages/HDFS/HDFSCommon.h>
-#include <Storages/HDFS/ReadBufferFromHDFS.h>
-#include <Storages/StorageS3Settings.h>
+#include <Interpreters/Context.h>
+#include <Storages/ObjectStorage/HDFS/AsynchronousReadBufferFromHDFS.h>
+#include <Storages/ObjectStorage/HDFS/HDFSCommon.h>
+#include <Storages/ObjectStorage/HDFS/ReadBufferFromHDFS.h>
 #include <Storages/SubstraitSource/ReadBufferBuilder.h>
 #include <Storages/SubstraitSource/SubstraitFileSource.h>
 #include <boost/compute/detail/lru_cache.hpp>
@@ -48,9 +48,14 @@
 #include <Poco/URI.h>
 #include <Common/CHUtil.h>
 #include <Common/FileCacheConcurrentMap.h>
-#include <Common/Throttler.h>
+#include <Common/GlutenConfig.h>
+#include <Common/GlutenSettings.h>
 #include <Common/logger_useful.h>
 #include <Common/safe_cast.h>
+
+#if USE_AZURE_BLOB_STORAGE
+#include <Disks/ObjectStorages/AzureBlobStorage/AzureBlobStorageCommon.h>
+#endif
 
 #if USE_AWS_S3
 #include <aws/core/client/DefaultRetryStrategy.h>
@@ -62,6 +67,12 @@
 
 namespace DB
 {
+namespace Setting
+{
+extern const SettingsUInt64 s3_max_redirects;
+extern const SettingsBool s3_disable_checksum;
+extern const SettingsUInt64 s3_retry_attempts;
+}
 namespace ErrorCodes
 {
     extern const int BAD_ARGUMENTS;
@@ -71,8 +82,6 @@ namespace ErrorCodes
     extern const int CANNOT_READ_FROM_FILE_DESCRIPTOR;
 }
 }
-
-namespace fs = std::filesystem;
 
 namespace local_engine
 {
@@ -200,6 +209,7 @@ public:
 #if USE_HDFS
 class HDFSFileReadBufferBuilder : public ReadBufferBuilder
 {
+    using ReadBufferCreator = std::function<std::unique_ptr<DB::ReadBufferFromFileBase>(bool restricted_seek, const DB::StoredObject & object)>;
 public:
     explicit HDFSFileReadBufferBuilder(DB::ContextPtr context_) : ReadBufferBuilder(context_), context(context_) { }
     ~HDFSFileReadBufferBuilder() override = default;
@@ -207,18 +217,21 @@ public:
     std::unique_ptr<DB::ReadBuffer>
     build(const substrait::ReadRel::LocalFiles::FileOrFiles & file_info, bool set_read_util_position) override
     {
-        bool enable_async_io = context->getConfigRef().getBool("hdfs.enable_async_io", true);
+        DB::ReadSettings read_settings = getReadSettings(context);
+        auto & config = context->getConfigRef();
+        auto hdfs_config = HdfsConfig::loadFromContext(config, read_settings);
         Poco::URI file_uri(file_info.uri_file());
         std::string uri_path = "hdfs://" + file_uri.getHost();
         if (file_uri.getPort())
-            uri_path += ":" + std::to_string(file_uri.getPort());
+            uri_path += ":" + std::to_string(static_cast<unsigned>(file_uri.getPort()));
 
-        DB::ReadSettings read_settings;
-        std::unique_ptr<DB::ReadBuffer> read_buffer;
+        size_t read_util_position = 0;
+        size_t read_begin = 0;
         if (set_read_util_position)
         {
             std::pair<size_t, size_t> start_end_pos
-                = adjustFileReadStartAndEndPos(file_info.start(), file_info.start() + file_info.length(), uri_path, file_uri.getPath());
+               = adjustFileReadStartAndEndPos(file_info.start(), file_info.start() + file_info.length(), uri_path, file_uri.getPath());
+
             LOG_DEBUG(
                 &Poco::Logger::get("ReadBufferBuilder"),
                 "File read start and end position adjusted from {},{} to {},{}",
@@ -227,34 +240,57 @@ public:
                 start_end_pos.first,
                 start_end_pos.second);
 
-            auto read_buffer_impl = std::make_unique<DB::ReadBufferFromHDFS>(
-                uri_path, file_uri.getPath(), context->getConfigRef(), read_settings, start_end_pos.second, true);
-            if (enable_async_io)
-            {
-                auto & pool_reader = context->getThreadPoolReader(DB::FilesystemReaderType::ASYNCHRONOUS_REMOTE_FS_READER);
-                read_buffer = std::make_unique<DB::AsynchronousReadBufferFromHDFS>(pool_reader, read_settings, std::move(read_buffer_impl));
-            }
-            else
-                read_buffer = std::move(read_buffer_impl);
+            read_begin = start_end_pos.first;
+            read_util_position = start_end_pos.second;
+        }
 
-            if (auto * seekable_in = dynamic_cast<DB::SeekableReadBuffer *>(read_buffer.get()))
-                if (start_end_pos.first)
-                    seekable_in->seek(start_end_pos.first, SEEK_SET);
+        size_t file_size = 0;
+        if (file_info.has_properties())
+            file_size = file_info.properties().filesize();
+
+        std::unique_ptr<DB::ReadBuffer> read_buffer;
+
+        if (hdfs_config.hdfs_async)
+        {
+            std::optional<size_t> size = std::nullopt;
+            if (file_size)
+                size = file_size;
+
+            auto read_buffer_impl = std::make_shared<DB::ReadBufferFromHDFS>(
+                            uri_path, file_uri.getPath(), config, read_settings, read_util_position, true, size);
+            auto & pool_reader = context->getThreadPoolReader(DB::FilesystemReaderType::ASYNCHRONOUS_REMOTE_FS_READER);
+            read_buffer = std::make_unique<DB::AsynchronousReadBufferFromHDFS>(pool_reader, read_settings, std::move(read_buffer_impl));
         }
         else
         {
-            auto read_buffer_impl
-                = std::make_unique<DB::ReadBufferFromHDFS>(uri_path, file_uri.getPath(), context->getConfigRef(), read_settings, 0, true);
-            if (enable_async_io)
+            if (!file_size)
             {
-                read_buffer = std::make_unique<DB::AsynchronousReadBufferFromHDFS>(
-                    context->getThreadPoolReader(DB::FilesystemReaderType::ASYNCHRONOUS_REMOTE_FS_READER),
-                    read_settings,
-                    std::move(read_buffer_impl));
+                // only for spark3.2 file partition not contained file size
+                // so first compute file size first
+                auto read_buffer_impl = std::make_unique<DB::ReadBufferFromHDFS>(
+                    uri_path, file_uri.getPath(), config, read_settings, read_util_position, true);
+                file_size = read_buffer_impl->getFileSize();
             }
-            else
-                read_buffer = std::move(read_buffer_impl);
+
+            ReadBufferCreator hdfs_read_buffer_creator
+                = [this, hdfs_uri = uri_path, hdfs_file_path = file_uri.getPath(), read_settings, &config, read_util_position](
+                      bool /* restricted_seek */, const DB::StoredObject & object) -> std::unique_ptr<DB::ReadBufferFromHDFS>
+            {
+                return std::make_unique<DB::ReadBufferFromHDFS>(
+                    hdfs_uri, hdfs_file_path, config, read_settings, read_util_position, true, object.bytes_size);
+            };
+
+            DB::StoredObjects stored_objects{DB::StoredObject{file_uri.getPath().substr(1), "", file_size}};
+            auto cache_hdfs_read = std::make_unique<DB::ReadBufferFromRemoteFSGather>(
+                std::move(hdfs_read_buffer_creator), stored_objects, "hdfs:", read_settings, nullptr, /* use_external_buffer */ false);
+            cache_hdfs_read->setReadUntilPosition(read_util_position);
+            read_buffer = std::move(cache_hdfs_read);
         }
+
+        if (set_read_util_position && read_begin)
+            if (auto * seekable_in = dynamic_cast<DB::SeekableReadBuffer *>(read_buffer.get()))
+                seekable_in->seek(read_begin, SEEK_SET);
+
         return read_buffer;
     }
 
@@ -362,6 +398,7 @@ public:
         result.second = get_next_line_pos(fs.get(), fin, read_end_pos, hdfs_file_size);
         return result;
     }
+
 private:
     DB::ContextPtr context;
 };
@@ -376,23 +413,20 @@ class S3FileReadBufferBuilder : public ReadBufferBuilder
 public:
     explicit S3FileReadBufferBuilder(DB::ContextPtr context_) : ReadBufferBuilder(context_)
     {
-        new_settings = context->getReadSettings();
-        new_settings.enable_filesystem_cache = context->getConfigRef().getBool("s3.local_cache.enabled", false);
-
-        if (new_settings.enable_filesystem_cache)
+        auto config = S3Config::loadFromContext(context);
+        // use gluten cache config is first priority
+        if (!file_cache && config.s3_local_cache_enabled)
         {
             DB::FileCacheSettings file_cache_settings;
-            file_cache_settings.max_size = static_cast<size_t>(context->getConfigRef().getUInt64("s3.local_cache.max_size", 100L << 30));
-            auto cache_base_path = context->getConfigRef().getString("s3.local_cache.cache_path", "/tmp/gluten/local_cache");
+            file_cache_settings.max_size = config.s3_local_cache_max_size;
+            auto cache_base_path = config.s3_local_cache_cache_path;
 
-            if (!fs::exists(cache_base_path))
-                fs::create_directories(cache_base_path);
+            if (!std::filesystem::exists(cache_base_path))
+                std::filesystem::create_directories(cache_base_path);
 
             file_cache_settings.base_path = cache_base_path;
             file_cache = DB::FileCacheFactory::instance().getOrCreate("s3_local_cache", file_cache_settings, "");
             file_cache->initialize();
-
-            new_settings.remote_fs_cache = file_cache;
         }
     }
 
@@ -401,6 +435,7 @@ public:
     std::unique_ptr<DB::ReadBuffer>
     build(const substrait::ReadRel::LocalFiles::FileOrFiles & file_info, bool set_read_util_position) override
     {
+        DB::ReadSettings read_settings = getReadSettings(context);
         Poco::URI file_uri(file_info.uri_file());
         // file uri looks like: s3a://my-dev-bucket/tpch100/part/0001.parquet
         const std::string& bucket = file_uri.getHost();
@@ -410,9 +445,8 @@ public:
         size_t object_size = object_info.size;
         Int64 object_modified_time = object_info.last_modification_time;
 
-        if (new_settings.enable_filesystem_cache)
+        if (read_settings.enable_filesystem_cache)
         {
-
             auto file_cache_key = DB::FileCacheKey(key);
             auto last_cache_time = files_cache_time_map.get(file_cache_key);
             // quick check
@@ -430,15 +464,15 @@ public:
         }
 
         auto read_buffer_creator
-            = [bucket, client, this](bool restricted_seek, const DB::StoredObject & object) -> std::unique_ptr<DB::ReadBufferFromFileBase>
+            = [bucket, client, read_settings, this](bool restricted_seek, const DB::StoredObject & object) -> std::unique_ptr<DB::ReadBufferFromFileBase>
         {
             return std::make_unique<DB::ReadBufferFromS3>(
                 client,
                 bucket,
                 object.remote_path,
                 "",
-                DB::S3Settings::RequestSettings(),
-                new_settings,
+                DB::S3::RequestSettings(),
+                read_settings,
                 /* use_external_buffer */ true,
                 /* offset */ 0,
                 /* read_until_position */0,
@@ -447,11 +481,11 @@ public:
 
         DB::StoredObjects stored_objects{DB::StoredObject{key, "", object_size}};
         auto s3_impl = std::make_unique<DB::ReadBufferFromRemoteFSGather>(
-            std::move(read_buffer_creator), stored_objects, "s3:" + bucket + "/", new_settings, /* cache_log */ nullptr, /* use_external_buffer */ true);
+            std::move(read_buffer_creator), stored_objects, "s3:" + bucket + "/", read_settings, /* cache_log */ nullptr, /* use_external_buffer */ true);
 
         auto & pool_reader = context->getThreadPoolReader(DB::FilesystemReaderType::ASYNCHRONOUS_REMOTE_FS_READER);
         auto async_reader
-            = std::make_unique<DB::AsynchronousBoundedReadBuffer>(std::move(s3_impl), pool_reader, new_settings, nullptr, nullptr);
+            = std::make_unique<DB::AsynchronousBoundedReadBuffer>(std::move(s3_impl), pool_reader, read_settings, nullptr, nullptr);
 
         if (set_read_util_position)
         {
@@ -472,7 +506,7 @@ public:
             async_reader->setReadUntilEnd();
         }
 
-        if (new_settings.remote_fs_prefetch)
+        if (read_settings.remote_fs_prefetch)
             async_reader->prefetch(Priority{});
 
         return async_reader;
@@ -482,16 +516,9 @@ private:
     static const std::string SHARED_CLIENT_KEY;
     static ConcurrentLRU<std::string, std::shared_ptr<DB::S3::Client>> per_bucket_clients;
     static FileCacheConcurrentMap files_cache_time_map;
-    DB::ReadSettings new_settings;
     DB::FileCachePtr file_cache;
 
-    std::string & stripQuote(std::string & s)
-    {
-        s.erase(remove(s.begin(), s.end(), '\''), s.end());
-        return s;
-    }
-
-    std::string toBucketNameSetting(const std::string & bucket_name, const std::string & config_name)
+    static std::string toBucketNameSetting(const std::string & bucket_name, const std::string & config_name)
     {
         if (!config_name.starts_with(BackendInitializerUtil::S3A_PREFIX))
         {
@@ -503,7 +530,7 @@ private:
             + config_name.substr(BackendInitializerUtil::S3A_PREFIX.size());
     }
 
-    std::string getSetting(
+    static std::string getSetting(
         const DB::Settings & settings,
         const std::string & bucket_name,
         const std::string & config_name,
@@ -512,11 +539,11 @@ private:
     {
         std::string ret;
         // if there's a bucket specific config, prefer it to non per bucket config
-        if (settings.tryGetString(toBucketNameSetting(bucket_name, config_name), ret))
-            return stripQuote(ret);
+        if (tryGetString(settings, toBucketNameSetting(bucket_name, config_name), ret))
+            return ret;
 
-        if (!require_per_bucket && settings.tryGetString(config_name, ret))
-            return stripQuote(ret);
+        if (!require_per_bucket && tryGetString(settings, config_name, ret))
+            return ret;
 
         return default_value;
     }
@@ -588,8 +615,8 @@ private:
         DB::S3::PocoHTTPClientConfiguration client_configuration = DB::S3::ClientFactory::instance().createClientConfiguration(
             region_name,
             context->getRemoteHostFilter(),
-            static_cast<unsigned>(context->getSettingsRef().s3_max_redirects),
-            static_cast<unsigned>(context->getSettingsRef().s3_retry_attempts),
+            static_cast<unsigned>(context->getSettingsRef()[DB::Setting::s3_max_redirects]),
+            static_cast<unsigned>(context->getSettingsRef()[DB::Setting::s3_retry_attempts]),
             false,
             false,
             nullptr,
@@ -605,15 +632,13 @@ private:
 
         std::string ak;
         std::string sk;
-        settings.tryGetString(BackendInitializerUtil::HADOOP_S3_ACCESS_KEY, ak);
-        settings.tryGetString(BackendInitializerUtil::HADOOP_S3_SECRET_KEY, sk);
-        stripQuote(ak);
-        stripQuote(sk);
+        tryGetString(settings, BackendInitializerUtil::HADOOP_S3_ACCESS_KEY, ak);
+        tryGetString(settings, BackendInitializerUtil::HADOOP_S3_SECRET_KEY, sk);
         const DB::Settings & global_settings = context->getGlobalContext()->getSettingsRef();
         const DB::Settings & local_settings = context->getSettingsRef();
         DB::S3::ClientSettings client_settings{
             .use_virtual_addressing = false,
-            .disable_checksum = local_settings.s3_disable_checksum,
+            .disable_checksum = local_settings[DB::Setting::s3_disable_checksum],
             .gcs_issue_compose_request = context->getConfigRef().getBool("s3.gcs_issue_compose_request", false),
         };
         if (use_assumed_role)
@@ -687,7 +712,19 @@ private:
     {
         if (shared_client)
             return shared_client;
-        shared_client = DB::getAzureBlobContainerClient(context->getConfigRef(), "blob");
+
+        const std::string config_prefix = "blob";
+        const Poco::Util::AbstractConfiguration & config = context->getConfigRef();
+        bool is_client_for_disk = false;
+        auto new_settings = DB::AzureBlobStorage::getRequestSettings(config, config_prefix, context);
+        DB::AzureBlobStorage::ConnectionParams params
+        {
+            .endpoint = DB::AzureBlobStorage::processEndpoint(config, config_prefix),
+            .auth_method = DB::AzureBlobStorage::getAuthMethod(config, config_prefix),
+            .client_options = DB::AzureBlobStorage::getClientOptions(*new_settings, is_client_for_disk),
+        };
+
+        shared_client = DB::AzureBlobStorage::getContainerClient(params, true);
         return shared_client;
     }
 };
@@ -713,6 +750,57 @@ void registerReadBufferBuilders()
     factory.registerBuilder("wasbs", [](DB::ContextPtr context_) { return std::make_shared<AzureBlobReadBuffer>(context_); });
 #endif
 }
+
+ReadBufferBuilder::ReadBufferBuilder(DB::ContextPtr context_) : context(context_)
+{
+    const auto & config = context->getConfigRef();
+    if (config.getBool("gluten_cache.local.enabled", false))
+    {
+        DB::FileCacheSettings file_cache_settings;
+
+        file_cache_settings.loadFromConfig(config, "gluten_cache.local");
+
+        if (std::filesystem::path(file_cache_settings.base_path).is_relative())
+            file_cache_settings.base_path = std::filesystem::path(context->getPath()) / "caches" / file_cache_settings.base_path;
+
+        if (!std::filesystem::exists(file_cache_settings.base_path))
+            std::filesystem::create_directories(file_cache_settings.base_path);
+
+        auto name = config.getString("gluten_cache.local.name");
+        auto * config_prefix = "";
+        file_cache = DB::FileCacheFactory::instance().getOrCreate(name, file_cache_settings, config_prefix);
+        file_cache->initialize();
+    }
+}
+
+DB::ReadSettings ReadBufferBuilder::getReadSettings(DB::ContextPtr context) const
+{
+    DB::ReadSettings read_settings = context->getReadSettings();
+    if (file_cache)
+    {
+        read_settings.enable_filesystem_cache = true;
+        read_settings.remote_fs_cache = file_cache;
+    }
+    else
+    {
+        read_settings.enable_filesystem_cache = false;
+    }
+
+    return read_settings;
+}
+
+
+std::unique_ptr<DB::ReadBuffer>
+ReadBufferBuilder::buildWithCompressionWrapper(const substrait::ReadRel::LocalFiles::FileOrFiles & file_info, bool set_read_util_position)
+{
+    auto in = build(file_info, set_read_util_position);
+
+    /// Wrap the read buffer with compression method if exists
+    Poco::URI file_uri(file_info.uri_file());
+    DB::CompressionMethod compression = DB::chooseCompressionMethod(file_uri.getPath(), "auto");
+    return compression != DB::CompressionMethod::None ? DB::wrapReadBufferWithCompressionMethod(std::move(in), compression) : std::move(in);
+}
+
 
 ReadBufferBuilderFactory & ReadBufferBuilderFactory::instance()
 {

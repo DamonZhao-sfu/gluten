@@ -65,12 +65,11 @@ static const std::unordered_set<std::string> kBlackList = {
     "concat_ws",
     "from_json",
     "json_array_length",
-    "repeat",
     "trunc",
     "sequence",
-    "arrays_overlap",
     "approx_percentile",
-    "get_array_struct_fields"};
+    "get_array_struct_fields",
+    "map_from_arrays"};
 
 } // namespace
 
@@ -191,31 +190,11 @@ bool SubstraitToVeloxPlanValidator::validateScalarFunction(
     return validateRound(scalarFunction, inputType);
   } else if (name == "extract") {
     return validateExtractExpr(params);
-  } else if (name == "char_length") {
-    VELOX_CHECK(types.size() == 1);
-    if (types[0] == "vbin") {
-      LOG_VALIDATION_MSG("Binary type is not supported in " + name);
-      return false;
-    }
-  } else if (name == "map_from_arrays") {
-    LOG_VALIDATION_MSG("map_from_arrays is not supported.");
-    return false;
-  } else if (name == "get_array_item") {
-    LOG_VALIDATION_MSG("get_array_item is not supported.");
-    return false;
   } else if (name == "concat") {
     for (const auto& type : types) {
       if (type.find("struct") != std::string::npos || type.find("map") != std::string::npos ||
           type.find("list") != std::string::npos) {
         LOG_VALIDATION_MSG(type + " is not supported in concat.");
-        return false;
-      }
-    }
-  } else if (name == "murmur3hash") {
-    for (const auto& type : types) {
-      if (type.find("struct") != std::string::npos || type.find("map") != std::string::npos ||
-          type.find("list") != std::string::npos) {
-        LOG_VALIDATION_MSG(type + " is not supported in murmur3hash.");
         return false;
       }
     }
@@ -369,11 +348,10 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::WriteRel& writeR
   // Validate partition key type.
   if (writeRel.has_table_schema()) {
     const auto& tableSchema = writeRel.table_schema();
-    std::vector<bool> isMetadataColumns;
-    std::vector<bool> isPartitionColumns;
-    SubstraitParser::parsePartitionAndMetadataColumns(tableSchema, isPartitionColumns, isMetadataColumns);
+    std::vector<ColumnType> columnTypes;
+    SubstraitParser::parseColumnTypes(tableSchema, columnTypes);
     for (auto i = 0; i < types.size(); i++) {
-      if (isPartitionColumns[i]) {
+      if (columnTypes[i] == ColumnType::kPartitionKey) {
         switch (types[i]->kind()) {
           case TypeKind::BOOLEAN:
           case TypeKind::TINYINT:
@@ -918,9 +896,13 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::JoinRel& joinRel
     switch (joinRel.type()) {
       case ::substrait::JoinRel_JoinType_JOIN_TYPE_INNER:
       case ::substrait::JoinRel_JoinType_JOIN_TYPE_LEFT:
+      case ::substrait::JoinRel_JoinType_JOIN_TYPE_RIGHT:
+      case ::substrait::JoinRel_JoinType_JOIN_TYPE_LEFT_SEMI:
+      case ::substrait::JoinRel_JoinType_JOIN_TYPE_RIGHT_SEMI:
+      case ::substrait::JoinRel_JoinType_JOIN_TYPE_LEFT_ANTI:
         break;
       default:
-        LOG_VALIDATION_MSG("Sort merge join only support inner and left join.");
+        LOG_VALIDATION_MSG("Sort merge join type is not supported: " + std::to_string(joinRel.type()));
         return false;
     }
   }
@@ -931,10 +913,10 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::JoinRel& joinRel
     case ::substrait::JoinRel_JoinType_JOIN_TYPE_RIGHT:
     case ::substrait::JoinRel_JoinType_JOIN_TYPE_LEFT_SEMI:
     case ::substrait::JoinRel_JoinType_JOIN_TYPE_RIGHT_SEMI:
-    case ::substrait::JoinRel_JoinType_JOIN_TYPE_ANTI:
+    case ::substrait::JoinRel_JoinType_JOIN_TYPE_LEFT_ANTI:
       break;
     default:
-      LOG_VALIDATION_MSG("Sort merge join only support inner and left join.");
+      LOG_VALIDATION_MSG("Join type is not supported: " + std::to_string(joinRel.type()));
       return false;
   }
 
@@ -1056,6 +1038,7 @@ bool SubstraitToVeloxPlanValidator::validateAggRelFunctionType(const ::substrait
           LOG_VALIDATION_MSG("Validation failed for function " + funcName + " resolve type in AggregateRel.");
           return false;
         }
+
         resolved = true;
         break;
       }
@@ -1179,11 +1162,11 @@ bool SubstraitToVeloxPlanValidator::validate(const ::substrait::AggregateRel& ag
       "regr_sxy",
       "regr_replacement"};
 
-  auto udfFuncs = UdfLoader::getInstance()->getRegisteredUdafNames();
+  auto udafFuncs = UdfLoader::getInstance()->getRegisteredUdafNames();
 
   for (const auto& funcSpec : funcSpecs) {
     auto funcName = SubstraitParser::getNameBeforeDelimiter(funcSpec);
-    if (supportedAggFuncs.find(funcName) == supportedAggFuncs.end() && udfFuncs.find(funcName) == udfFuncs.end()) {
+    if (supportedAggFuncs.find(funcName) == supportedAggFuncs.end() && udafFuncs.find(funcName) == udafFuncs.end()) {
       LOG_VALIDATION_MSG(funcName + " was not supported in AggregateRel.");
       return false;
     }

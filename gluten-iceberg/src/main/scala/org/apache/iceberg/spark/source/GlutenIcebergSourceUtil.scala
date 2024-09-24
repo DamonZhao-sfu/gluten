@@ -25,7 +25,8 @@ import org.apache.spark.sql.catalyst.catalog.ExternalCatalogUtils
 import org.apache.spark.sql.connector.read.{InputPartition, Scan}
 import org.apache.spark.sql.types.StructType
 
-import org.apache.iceberg.{CombinedScanTask, DeleteFile, FileFormat, FileScanTask, ScanTask}
+import org.apache.iceberg.{CombinedScanTask, DeleteFile, FileFormat, FileScanTask, ScanTask, Schema}
+import org.apache.iceberg.spark.SparkSchemaUtil
 
 import java.lang.{Long => JLong}
 import java.util.{ArrayList => JArrayList, HashMap => JHashMap, List => JList, Map => JMap}
@@ -34,7 +35,10 @@ import scala.collection.JavaConverters._
 
 object GlutenIcebergSourceUtil {
 
-  def genSplitInfo(inputPartition: InputPartition, index: Int): SplitInfo = inputPartition match {
+  def genSplitInfo(
+      inputPartition: InputPartition,
+      index: Int,
+      readPartitionSchema: StructType): SplitInfo = inputPartition match {
     case partition: SparkInputPartition =>
       val paths = new JArrayList[String]()
       val starts = new JArrayList[JLong]()
@@ -50,8 +54,8 @@ object GlutenIcebergSourceUtil {
           paths.add(filePath)
           starts.add(task.start())
           lengths.add(task.length())
-          partitionColumns.add(getPartitionColumns(task))
-          deleteFilesList.add(task.deletes());
+          partitionColumns.add(getPartitionColumns(task, readPartitionSchema))
+          deleteFilesList.add(task.deletes())
           val currentFileFormat = convertFileFormat(task.file().format())
           if (fileFormat == ReadFileFormat.UnknownFormat) {
             fileFormat = currentFileFormat
@@ -94,21 +98,29 @@ object GlutenIcebergSourceUtil {
       throw new GlutenNotSupportException("Only support iceberg SparkBatchQueryScan.")
   }
 
-  def getPartitionSchema(sparkScan: Scan): StructType = sparkScan match {
+  def getReadPartitionSchema(sparkScan: Scan): StructType = sparkScan match {
     case scan: SparkBatchQueryScan =>
       val tasks = scan.tasks().asScala
       asFileScanTask(tasks.toList).foreach {
         task =>
           val spec = task.spec()
           if (spec.isPartitioned) {
-            var partitionSchema = new StructType()
-            val partitionFields = spec.partitionType().fields().asScala
+            val readFields = scan.readSchema().fields.map(_.name).toSet
+            // Iceberg will generate some non-table fields as partition fields, such as x_bucket,
+            // which will not appear in readFields, they also cannot be filtered.
+            val tableFields = spec.schema().columns().asScala.map(_.name()).toSet
+            val partitionFields =
+              spec
+                .partitionType()
+                .fields()
+                .asScala
+                .filter(f => !tableFields.contains(f.name) || readFields.contains(f.name()))
             partitionFields.foreach {
-              field =>
-                TypeUtil.validatePartitionColumnType(field.`type`().typeId())
-                partitionSchema = partitionSchema.add(field.name(), field.`type`().toString)
+              field => TypeUtil.validatePartitionColumnType(field.`type`().typeId())
             }
-            return partitionSchema
+
+            val icebergSchema = new Schema(partitionFields.toList.asJava)
+            return SparkSchemaUtil.convert(icebergSchema)
           } else {
             return new StructType()
           }
@@ -130,12 +142,16 @@ object GlutenIcebergSourceUtil {
     }
   }
 
-  private def getPartitionColumns(task: FileScanTask): JHashMap[String, String] = {
+  private def getPartitionColumns(
+      task: FileScanTask,
+      readPartitionSchema: StructType): JHashMap[String, String] = {
     val partitionColumns = new JHashMap[String, String]()
+    val readPartitionFields = readPartitionSchema.fields.map(_.name).toSet
     val spec = task.spec()
     val partition = task.partition()
     if (spec.isPartitioned) {
-      val partitionFields = spec.partitionType().fields().asScala
+      val partitionFields =
+        spec.partitionType().fields().asScala.filter(f => readPartitionFields.contains(f.name()))
       partitionFields.zipWithIndex.foreach {
         case (field, index) =>
           val partitionValue = partition.get(index, field.`type`().typeId().javaClass())

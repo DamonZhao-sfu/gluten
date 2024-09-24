@@ -16,7 +16,9 @@
  */
 package org.apache.spark.sql.execution.datasources.v1.clickhouse
 
-import org.apache.spark.{TaskContext, TaskOutputFileAlreadyExistException}
+import org.apache.gluten.memory.CHThreadGroup
+
+import org.apache.spark.{SparkException, TaskContext, TaskOutputFileAlreadyExistException}
 import org.apache.spark.internal.Logging
 import org.apache.spark.internal.io.{FileCommitProtocol, SparkHadoopWriterUtils}
 import org.apache.spark.shuffle.FetchFailedException
@@ -28,7 +30,6 @@ import org.apache.spark.sql.catalyst.expressions.BindReferences.bindReferences
 import org.apache.spark.sql.catalyst.plans.physical.HashPartitioning
 import org.apache.spark.sql.catalyst.util.{CaseInsensitiveMap, DateTimeUtils}
 import org.apache.spark.sql.delta.constraints.Constraint
-import org.apache.spark.sql.errors.QueryExecutionErrors
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.datasources._
 import org.apache.spark.sql.execution.datasources.FileFormatWriter.{processStats, ConcurrentOutputWriterSpec, OutputSpec}
@@ -93,7 +94,8 @@ object MergeTreeFileFormatWriter extends Logging {
 
     val writerBucketSpec = bucketSpec.map {
       spec =>
-        val bucketColumns = spec.bucketColumnNames.map(c => dataColumns.find(_.name == c).get)
+        val bucketColumns =
+          spec.bucketColumnNames.map(c => dataColumns.find(_.name.equalsIgnoreCase(c)).get)
         // Spark bucketed table: use `HashPartitioning.partitionIdExpression` as bucket id
         // expression, so that we can guarantee the data distribution is same between shuffle and
         // bucketed data source, which enables us to only shuffle one side when join a bucketed
@@ -103,7 +105,7 @@ object MergeTreeFileFormatWriter extends Logging {
         MergeTreeWriterBucketSpec(bucketIdExpression, (_: Int) => "")
     }
     val sortColumns = bucketSpec.toSeq.flatMap {
-      spec => spec.sortColumnNames.map(c => dataColumns.find(_.name == c).get)
+      spec => spec.sortColumnNames.map(c => dataColumns.find(_.name.equalsIgnoreCase(c)).get)
     }
 
     val caseInsensitiveOptions = CaseInsensitiveMap(options)
@@ -163,13 +165,14 @@ object MergeTreeFileFormatWriter extends Logging {
       if (writerBucketSpec.isDefined) {
         // We need to add the bucket id expression to the output of the sort plan,
         // so that we can use backend to calculate the bucket id for each row.
-        wrapped = ProjectExec(
-          wrapped.output :+ Alias(writerBucketSpec.get.bucketIdExpression, "__bucket_value__")(),
-          wrapped)
+        val bucketValueExpr = bindReferences(
+          Seq(writerBucketSpec.get.bucketIdExpression),
+          finalOutputSpec.outputColumns)
+        wrapped =
+          ProjectExec(wrapped.output :+ Alias(bucketValueExpr.head, "__bucket_value__")(), wrapped)
         // TODO: to optimize, bucket value is computed twice here
       }
 
-      val nativeFormat = sparkSession.sparkContext.getLocalProperty("nativeFormat")
       (GlutenMergeTreeWriterInjects.getInstance().executeWriterWrappedSparkPlan(wrapped), None)
     }
 
@@ -249,7 +252,7 @@ object MergeTreeFileFormatWriter extends Logging {
       case cause: Throwable =>
         logError(s"Aborting job ${description.uuid}.", cause)
         committer.abortJob(job)
-        throw QueryExecutionErrors.jobAbortedError(cause)
+        throw cause
     }
   }
   // scalastyle:on argcount
@@ -264,7 +267,7 @@ object MergeTreeFileFormatWriter extends Logging {
       iterator: Iterator[InternalRow],
       concurrentOutputWriterSpec: Option[ConcurrentOutputWriterSpec]
   ): MergeTreeWriteTaskResult = {
-
+    CHThreadGroup.registerNewThreadGroup();
     val jobId = SparkHadoopWriterUtils.createJobID(new Date(jobIdInstant), sparkStageId)
     val taskId = new TaskID(jobId, TaskType.MAP, sparkPartitionId)
     val taskAttemptId = new TaskAttemptID(taskId, sparkAttemptNumber)
@@ -329,7 +332,7 @@ object MergeTreeFileFormatWriter extends Logging {
         // We throw the exception and let Executor throw ExceptionFailure to abort the job.
         throw new TaskOutputFileAlreadyExistException(f)
       case t: Throwable =>
-        throw QueryExecutionErrors.taskFailedWhileWritingRowsError(t)
+        throw new SparkException("Task failed while writing rows.", t)
     }
   }
 }

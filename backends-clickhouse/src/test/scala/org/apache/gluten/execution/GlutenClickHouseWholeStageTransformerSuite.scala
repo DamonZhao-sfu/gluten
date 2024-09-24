@@ -23,6 +23,7 @@ import org.apache.spark.{SPARK_VERSION_SHORT, SparkConf}
 import org.apache.spark.sql.execution.datasources.v2.clickhouse.ClickHouseConfig
 
 import org.apache.commons.io.FileUtils
+import org.scalatest.Tag
 
 import java.io.File
 
@@ -49,11 +50,17 @@ class GlutenClickHouseWholeStageTransformerSuite extends WholeStageTransformerSu
 
   val HDFS_METADATA_PATH = s"/tmp/metadata/hdfs/$sparkVersion/"
   val HDFS_CACHE_PATH = s"/tmp/hdfs_cache/$sparkVersion/"
-  val HDFS_URL_ENDPOINT = s"hdfs://127.0.0.1:8020"
+  val HDFS_URL_ENDPOINT = "hdfs://127.0.0.1:8020"
   val HDFS_URL = s"$HDFS_URL_ENDPOINT/$sparkVersion"
 
   val S3_ACCESS_KEY = "BypTYzcXOlfr03FFIvt4"
   val S3_SECRET_KEY = "K9MDaGItPSaphorZM8t4hXf30gHF9dBWi6L2dK5E"
+
+  val CH_DEFAULT_STORAGE_DIR = "/data"
+
+  protected def spark32: Boolean = sparkVersion.equals("3.2")
+  protected def spark33: Boolean = sparkVersion.equals("3.3")
+  protected def spark35: Boolean = sparkVersion.equals("3.5")
 
   def AlmostEqualsIsRel(expected: Double, actual: Double, EPSILON: Double = DBL_EPSILON): Unit = {
     val diff = Math.abs(expected - actual)
@@ -68,16 +75,14 @@ class GlutenClickHouseWholeStageTransformerSuite extends WholeStageTransformerSu
   }
 
   override protected def sparkConf: SparkConf = {
+    import org.apache.gluten.backendsapi.clickhouse.CHConf._
+
     val conf = super.sparkConf
       .set(GlutenConfig.GLUTEN_LIB_PATH, UTSystemParameters.clickHouseLibPath)
-      .set(
-        "spark.gluten.sql.columnar.backend.ch.use.v2",
-        ClickHouseConfig.DEFAULT_USE_DATASOURCE_V2)
+      .set(ClickHouseConfig.USE_DATASOURCE_V2, ClickHouseConfig.DEFAULT_USE_DATASOURCE_V2)
       .set("spark.gluten.sql.enable.native.validation", "false")
       .set("spark.sql.warehouse.dir", warehouse)
-      .set(
-        "spark.gluten.sql.columnar.backend.ch.runtime_config.user_defined_path",
-        "/tmp/user_defined")
+      .setCHConfig("user_defined_path", "/tmp/user_defined")
     if (UTSystemParameters.testMergeTreeOnObjectStorage) {
       conf
         .set("spark.hadoop.fs.s3a.access.key", S3_ACCESS_KEY)
@@ -86,70 +91,46 @@ class GlutenClickHouseWholeStageTransformerSuite extends WholeStageTransformerSu
         .set("spark.hadoop.fs.s3a.endpoint", MINIO_ENDPOINT)
         .set("spark.hadoop.fs.s3a.path.style.access", "true")
         .set("spark.hadoop.fs.s3a.connection.ssl.enabled", "false")
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.storage_configuration.disks.s3.type",
-          "s3_gluten")
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.storage_configuration.disks.s3.endpoint",
-          WHOLE_PATH)
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.storage_configuration.disks.s3.access_key_id",
-          S3_ACCESS_KEY)
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.storage_configuration.disks.s3.secret_access_key",
-          S3_SECRET_KEY)
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.storage_configuration.disks.s3.metadata_path",
-          S3_METADATA_PATH)
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.storage_configuration.disks.s3_cache.type",
-          "cache")
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.storage_configuration.disks.s3_cache.disk",
-          "s3")
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.storage_configuration.disks.s3_cache.path",
-          S3_CACHE_PATH)
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.storage_configuration.disks.s3_cache.max_size",
-          "10Gi")
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.storage_configuration.policies.__s3_main.volumes",
-          "main")
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.storage_configuration.policies.__s3_main.volumes.main.disk",
-          "s3_cache")
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.storage_configuration.disks.hdfs.type",
-          "hdfs_gluten")
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.storage_configuration.disks.hdfs.endpoint",
-          HDFS_URL_ENDPOINT + "/")
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.storage_configuration.disks.hdfs.metadata_path",
-          HDFS_METADATA_PATH)
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.storage_configuration.disks.hdfs_cache.type",
-          "cache")
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.storage_configuration.disks.hdfs_cache.disk",
-          "hdfs")
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.storage_configuration.disks.hdfs_cache.path",
-          HDFS_CACHE_PATH)
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.storage_configuration.disks.hdfs_cache.max_size",
-          "10Gi")
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.storage_configuration.policies.__hdfs_main.volumes",
-          "main")
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.storage_configuration.policies.__hdfs_main.volumes.main.disk",
-          "hdfs_cache")
-        .set(
-          "spark.gluten.sql.columnar.backend.ch.runtime_config.hdfs.dfs_client_read_shortcircuit",
-          "false")
-        .set("spark.gluten.sql.columnar.backend.ch.runtime_config.hdfs.dfs_default_replica", "1")
+        .setCHConfig(
+          "storage_configuration.disks.s3.type" -> "s3_gluten",
+          "storage_configuration.disks.s3.endpoint" -> WHOLE_PATH,
+          "storage_configuration.disks.s3.access_key_id" -> S3_ACCESS_KEY,
+          "storage_configuration.disks.s3.secret_access_key" -> S3_SECRET_KEY,
+          "storage_configuration.disks.s3.metadata_path" -> S3_METADATA_PATH,
+          "storage_configuration.disks.s3_cache.type" -> "cache",
+          "storage_configuration.disks.s3_cache.disk" -> "s3",
+          "storage_configuration.disks.s3_cache.path" -> S3_CACHE_PATH,
+          "storage_configuration.disks.s3_cache.max_size" -> "10Gi",
+          "storage_configuration.policies.__s3_main.volumes" -> "main",
+          "storage_configuration.policies.__s3_main.volumes.main.disk" -> "s3_cache"
+        )
+        .setCHConfig(
+          "storage_configuration.disks.hdfs.type" -> "hdfs_gluten",
+          "storage_configuration.disks.hdfs.endpoint" -> s"$HDFS_URL_ENDPOINT/",
+          "storage_configuration.disks.hdfs.metadata_path" -> HDFS_METADATA_PATH,
+          "storage_configuration.disks.hdfs_cache.type" -> "cache",
+          "storage_configuration.disks.hdfs_cache.disk" -> "hdfs",
+          "storage_configuration.disks.hdfs_cache.path" -> HDFS_CACHE_PATH,
+          "storage_configuration.disks.hdfs_cache.max_size" -> "10Gi",
+          "storage_configuration.policies.__hdfs_main.volumes" -> "main",
+          "storage_configuration.policies.__hdfs_main.volumes.main.disk" -> "hdfs_cache"
+        )
+        .setCHConfig(
+          "storage_configuration.disks.hdfs2.type" -> "hdfs_gluten",
+          "storage_configuration.disks.hdfs2.endpoint" -> s"$HDFS_URL_ENDPOINT/",
+          "storage_configuration.disks.hdfs2.metadata_path" -> HDFS_METADATA_PATH,
+          "storage_configuration.disks.hdfs2.metadata_type" -> "rocksdb",
+          "storage_configuration.disks.hdfs_cache2.type" -> "cache",
+          "storage_configuration.disks.hdfs_cache2.disk" -> "hdfs2",
+          "storage_configuration.disks.hdfs_cache2.path" -> HDFS_CACHE_PATH,
+          "storage_configuration.disks.hdfs_cache2.max_size" -> "10Gi",
+          "storage_configuration.policies.__hdfs_main_rocksdb.volumes" -> "main",
+          "storage_configuration.policies.__hdfs_main_rocksdb.volumes.main.disk" -> "hdfs_cache2"
+        )
+        .setCHConfig(
+          "hdfs.dfs_client_read_shortcircuit" -> "false",
+          "hdfs.dfs_default_replica" -> "1"
+        )
     } else {
       conf
     }
@@ -161,6 +142,9 @@ class GlutenClickHouseWholeStageTransformerSuite extends WholeStageTransformerSu
   }
 
   override def beforeAll(): Unit = {
+    // is not exist may cause some ut error
+    assert(new File(CH_DEFAULT_STORAGE_DIR).exists())
+
     // prepare working paths
     val basePathDir = new File(basePath)
     if (basePathDir.exists()) {
@@ -172,13 +156,25 @@ class GlutenClickHouseWholeStageTransformerSuite extends WholeStageTransformerSu
     super.beforeAll()
   }
 
-  protected val rootPath = this.getClass.getResource("/").getPath
-  protected val basePath = rootPath + "tests-working-home"
-  protected val warehouse = basePath + "/spark-warehouse"
-  protected val metaStorePathAbsolute = basePath + "/meta"
-  protected val hiveMetaStoreDB = metaStorePathAbsolute + "/metastore_db"
+  final protected val rootPath: String = this.getClass.getResource("/").getPath
+  final protected val basePath: String = rootPath + "tests-working-home"
+  final protected val warehouse: String = basePath + "/spark-warehouse"
+  final protected val metaStorePathAbsolute: String = basePath + "/meta"
+
+  protected val hiveMetaStoreDB: String =
+    s"$metaStorePathAbsolute/${getClass.getSimpleName}/metastore_db"
 
   final override protected val resourcePath: String = "" // ch not need this
   override protected val fileFormat: String = "parquet"
+
+  protected def testSparkVersionLE33(testName: String, testTag: Tag*)(testFun: => Any): Unit = {
+    if (isSparkVersionLE("3.3")) {
+      test(testName, testTag: _*)(testFun)
+    } else {
+      ignore(s"[$SPARK_VERSION_SHORT]-$testName", testTag: _*)(testFun)
+    }
+  }
+
+  lazy val pruningTimeValueSpark: Int = if (isSparkVersionLE("3.3")) -1 else 0
 }
 // scalastyle:off line.size.limit

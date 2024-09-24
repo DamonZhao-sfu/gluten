@@ -19,6 +19,9 @@ package org.apache.gluten.execution
 import org.apache.gluten.GlutenConfig
 import org.apache.gluten.sql.shims.SparkShimLoader
 
+import org.apache.spark.SparkConf
+import org.apache.spark.scheduler.{SparkListener, SparkListenerStageCompleted}
+import org.apache.spark.sql.TestUtils
 import org.apache.spark.sql.execution.CommandResultExec
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
 import org.apache.spark.sql.internal.SQLConf
@@ -50,6 +53,11 @@ class VeloxMetricsSuite extends VeloxWholeStageTransformerSuite with AdaptiveSpa
     spark.sql("drop table metrics_t2")
 
     super.afterAll()
+  }
+
+  override protected def sparkConf: SparkConf = {
+    super.sparkConf
+      .set("spark.shuffle.manager", "org.apache.spark.shuffle.sort.ColumnarShuffleManager")
   }
 
   test("test sort merge join metrics") {
@@ -128,6 +136,51 @@ class VeloxMetricsSuite extends VeloxWholeStageTransformerSuite with AdaptiveSpa
     }
   }
 
+  test("Generate metrics") {
+    runQueryAndCompare("SELECT explode(array(c1, c2, 1)) FROM metrics_t1") {
+      df =>
+        val generate = find(df.queryExecution.executedPlan) {
+          case _: GenerateExecTransformer => true
+          case _ => false
+        }
+        assert(generate.isDefined)
+        val metrics = generate.get.metrics
+        assert(metrics("numOutputRows").value == 300)
+        assert(metrics("numOutputVectors").value > 0)
+        assert(metrics("numOutputBytes").value > 0)
+    }
+  }
+
+  test("Metrics of window") {
+    runQueryAndCompare("SELECT c1, c2, sum(c2) over (partition by c1) as s FROM metrics_t1") {
+      df =>
+        val window = find(df.queryExecution.executedPlan) {
+          case _: WindowExecTransformer => true
+          case _ => false
+        }
+        assert(window.isDefined)
+        val metrics = window.get.metrics
+        assert(metrics("numOutputRows").value == 100)
+        assert(metrics("outputVectors").value == 2)
+    }
+  }
+
+  test("Metrics of noop filter's children") {
+    withSQLConf("spark.gluten.ras.enabled" -> "true") {
+      runQueryAndCompare("SELECT c1, c2 FROM metrics_t1 where c1 < 50") {
+        df =>
+          val scan = find(df.queryExecution.executedPlan) {
+            case _: FileSourceScanExecTransformer => true
+            case _ => false
+          }
+          assert(scan.isDefined)
+          val metrics = scan.get.metrics
+          assert(metrics("rawInputRows").value == 100)
+          assert(metrics("outputVectors").value == 1)
+      }
+    }
+  }
+
   test("Write metrics") {
     if (SparkShimLoader.getSparkVersion.startsWith("3.4")) {
       withSQLConf(("spark.gluten.sql.native.writer.enabled", "true")) {
@@ -144,9 +197,34 @@ class VeloxMetricsSuite extends VeloxWholeStageTransformerSuite with AdaptiveSpa
             assert(write.isDefined)
             val metrics = write.get.metrics
             assert(metrics("physicalWrittenBytes").value > 0)
+            assert(metrics("writeIONanos").value > 0)
             assert(metrics("numWrittenFiles").value == 1)
         }
       }
     }
+  }
+
+  test("File scan task input metrics") {
+    createTPCHNotNullTables()
+
+    @volatile var inputRecords = 0L
+    val partTableRecords = spark.sql("select * from part").count()
+    val itemTableRecords = spark.sql("select * from lineitem").count()
+    val inputMetricsListener = new SparkListener {
+      override def onStageCompleted(stageCompleted: SparkListenerStageCompleted): Unit = {
+        inputRecords += stageCompleted.stageInfo.taskMetrics.inputMetrics.recordsRead
+      }
+    }
+
+    TestUtils.withListener(spark.sparkContext, inputMetricsListener) {
+      _ =>
+        val df = spark.sql("""
+                             |select /*+ BROADCAST(part) */ * from part join lineitem
+                             |on l_partkey = p_partkey
+                             |""".stripMargin)
+        df.count()
+    }
+
+    assert(inputRecords == (partTableRecords + itemTableRecords))
   }
 }

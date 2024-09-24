@@ -14,14 +14,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+#include "CHUtil.h"
+
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <unistd.h>
 #include <AggregateFunctions/Combinators/AggregateFunctionCombinatorFactory.h>
 #include <AggregateFunctions/registerAggregateFunctions.h>
 #include <Columns/ColumnArray.h>
 #include <Columns/ColumnConst.h>
-#include <Columns/ColumnMap.h>
 #include <Columns/ColumnNullable.h>
 #include <Columns/ColumnTuple.h>
 #include <Columns/IColumn.h>
@@ -30,29 +33,37 @@
 #include <Core/Defines.h>
 #include <Core/NamesAndTypes.h>
 #include <DataTypes/DataTypeArray.h>
-#include <DataTypes/DataTypeMap.h>
+#include <DataTypes/DataTypeDateTime64.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypeString.h>
 #include <DataTypes/DataTypeTuple.h>
+#include <DataTypes/DataTypesDecimal.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <DataTypes/NestedUtils.h>
 #include <Disks/registerDisks.h>
+#include <Disks/registerGlutenDisks.h>
 #include <Functions/FunctionFactory.h>
+#include <Functions/FunctionHelpers.h>
 #include <Functions/registerFunctions.h>
-#include <IO/ReadBufferFromFile.h>
 #include <IO/SharedThreadPools.h>
 #include <Interpreters/JIT/CompiledExpressionCache.h>
-#include <Parser/RelParser.h>
+#include <Parser/RelParsers/RelParser.h>
 #include <Parser/SerializedPlanParser.h>
+#include <Parser/SubstraitParserUtils.h>
+#include <Planner/PlannerActionsVisitor.h>
 #include <Processors/Chunk.h>
+#include <Processors/QueryPlan/ExpressionStep.h>
 #include <Processors/QueryPlan/QueryPlan.h>
 #include <QueryPipeline/QueryPipelineBuilder.h>
 #include <QueryPipeline/printPipeline.h>
+#include <Storages/Cache/CacheManager.h>
+#include <Storages/MergeTree/StorageMergeTreeFactory.h>
 #include <Storages/Output/WriteBufferBuilder.h>
-#include <Storages/StorageMergeTreeFactory.h>
 #include <Storages/SubstraitSource/ReadBufferBuilder.h>
+#include <boost/algorithm/string/case_conv.hpp>
+#include <boost/algorithm/string/predicate.hpp>
 #include <google/protobuf/util/json_util.h>
-#include <google/protobuf/wrappers.pb.h>
+#include <sys/resource.h>
 #include <Poco/Logger.h>
 #include <Poco/Util/MapConfiguration.h>
 #include <Common/BitHelpers.h>
@@ -60,30 +71,27 @@
 #include <Common/CurrentThread.h>
 #include <Common/GlutenSignalHandler.h>
 #include <Common/LoggerExtend.h>
+#include <Common/QueryContext.h>
 #include <Common/logger_useful.h>
 #include <Common/typeid_cast.h>
 
-#include <boost/algorithm/string/case_conv.hpp>
-#include <boost/algorithm/string/predicate.hpp>
-
-#include "CHUtil.h"
-#include "Disks/registerGlutenDisks.h"
-
-#include <unistd.h>
-#include <sys/resource.h>
-
 namespace DB
 {
+namespace Setting
+{
+extern const SettingsUInt64 prefer_external_sort_block_bytes;
+extern const SettingsUInt64 max_bytes_before_external_sort;
+}
 namespace ErrorCodes
 {
 extern const int BAD_ARGUMENTS;
+extern const int UNKNOWN_TYPE;
+extern const int CANNOT_PARSE_PROTOBUF_SCHEMA;
 }
 }
 
 namespace local_engine
 {
-constexpr auto VIRTUAL_ROW_COUNT_COLUMN = "__VIRTUAL_ROW_COUNT_COLUMN__";
-
 namespace fs = std::filesystem;
 
 DB::Block BlockUtil::buildRowCountHeader()
@@ -124,6 +132,27 @@ DB::Block BlockUtil::buildHeader(const DB::NamesAndTypesList & names_types_list)
         cols.emplace_back(col);
     }
     return DB::Block(cols);
+}
+
+/// The column names may be different in two blocks.
+/// and the nullability also could be different, with TPCDS-Q1 as an example.
+DB::ColumnWithTypeAndName
+BlockUtil::convertColumnAsNecessary(const DB::ColumnWithTypeAndName & column, const DB::ColumnWithTypeAndName & sample_column)
+{
+    if (sample_column.type->equals(*column.type))
+        return {column.column, column.type, sample_column.name};
+    else if (sample_column.type->isNullable() && !column.type->isNullable() && DB::removeNullable(sample_column.type)->equals(*column.type))
+    {
+        auto nullable_column = column;
+        DB::JoinCommon::convertColumnToNullable(nullable_column);
+        return {nullable_column.column, sample_column.type, sample_column.name};
+    }
+    else
+        throw DB::Exception(
+            DB::ErrorCodes::LOGICAL_ERROR,
+            "Columns have different types. original:{} expected:{}",
+            column.dumpStructure(),
+            sample_column.dumpStructure());
 }
 
 /**
@@ -290,7 +319,6 @@ DB::Block BlockUtil::concatenateBlocksMemoryEfficiently(std::vector<DB::Block> &
     return out;
 }
 
-
 size_t PODArrayUtil::adjustMemoryEfficientSize(size_t n)
 {
     /// According to definition of DEFUALT_BLOCK_SIZE
@@ -311,45 +339,49 @@ size_t PODArrayUtil::adjustMemoryEfficientSize(size_t n)
 
 std::string PlanUtil::explainPlan(DB::QueryPlan & plan)
 {
-    std::string plan_str;
-    DB::QueryPlan::ExplainPlanOptions buf_opt{
+    constexpr DB::QueryPlan::ExplainPlanOptions buf_opt{
         .header = true,
         .actions = true,
         .indexes = true,
     };
     DB::WriteBufferFromOwnString buf;
     plan.explainPlan(buf, buf_opt);
-    plan_str = buf.str();
-    return plan_str;
+
+    return buf.str();
 }
 
-std::vector<MergeTreeUtil::Path> MergeTreeUtil::getAllMergeTreeParts(const Path & storage_path)
+void PlanUtil::checkOuputType(const DB::QueryPlan & plan)
 {
-    if (!fs::exists(storage_path))
-        throw DB::Exception(DB::ErrorCodes::BAD_ARGUMENTS, "Invalid merge tree store path:{}", storage_path.string());
-
-    // TODO: May need to check the storage format version
-    std::vector<fs::path> res;
-    for (const auto & entry : fs::directory_iterator(storage_path))
+    // QueryPlan::checkInitialized is a private method, so we assume plan is initialized, otherwise there is a core dump here.
+    // It's okay, because it's impossible for us not to initialize where we call this method.
+    const auto & step = *plan.getRootNode()->step;
+    if (!step.hasOutputStream())
+        return;
+    if (!step.getOutputStream().header)
+        return;
+    for (const auto & elem : step.getOutputStream().header)
     {
-        auto filename = entry.path().filename();
-        if (filename == "format_version.txt" || filename == "detached" || filename == "_delta_log")
-            continue;
-        res.push_back(entry.path());
+        const DB::DataTypePtr & ch_type = elem.type;
+        const auto ch_type_without_nullable = DB::removeNullable(ch_type);
+        const DB::WhichDataType which(ch_type_without_nullable);
+        if (which.isDateTime64())
+        {
+            const auto * ch_type_datetime64 = checkAndGetDataType<DataTypeDateTime64>(ch_type_without_nullable.get());
+            if (ch_type_datetime64->getScale() != 6)
+                throw Exception(ErrorCodes::UNKNOWN_TYPE, "Spark doesn't support converting from {}", ch_type->getName());
+        }
+        else if (which.isDecimal())
+        {
+            if (which.isDecimal256())
+                throw Exception(ErrorCodes::UNKNOWN_TYPE, "Spark doesn't support converting from {}", ch_type->getName());
+
+            const auto scale = getDecimalScale(*ch_type_without_nullable);
+            const auto precision = getDecimalPrecision(*ch_type_without_nullable);
+            if (scale == 0 && precision == 0)
+                throw Exception(ErrorCodes::UNKNOWN_TYPE, "Spark doesn't support converting from {}", ch_type->getName());
+        }
     }
-    return res;
 }
-
-DB::NamesAndTypesList MergeTreeUtil::getSchemaFromMergeTreePart(const fs::path & part_path)
-{
-    DB::NamesAndTypesList names_types_list;
-    if (!fs::exists(part_path))
-        throw DB::Exception(DB::ErrorCodes::BAD_ARGUMENTS, "Invalid merge tree store path:{}", part_path.string());
-    DB::ReadBufferFromFile readbuffer((part_path / "columns.txt").string());
-    names_types_list.readText(readbuffer);
-    return names_types_list;
-}
-
 
 NestedColumnExtractHelper::NestedColumnExtractHelper(const DB::Block & block_, bool case_insentive_)
     : block(block_), case_insentive(case_insentive_)
@@ -434,22 +466,37 @@ const DB::ColumnWithTypeAndName * NestedColumnExtractHelper::findColumn(const DB
 }
 
 const DB::ActionsDAG::Node * ActionsDAGUtil::convertNodeType(
-    DB::ActionsDAGPtr & actions_dag,
+    DB::ActionsDAG & actions_dag,
     const DB::ActionsDAG::Node * node,
-    const std::string & type_name,
+    const DataTypePtr & cast_to_type,
     const std::string & result_name,
     CastType cast_type)
 {
     DB::ColumnWithTypeAndName type_name_col;
-    type_name_col.name = type_name;
+    type_name_col.name = cast_to_type->getName();
     type_name_col.column = DB::DataTypeString().createColumnConst(0, type_name_col.name);
     type_name_col.type = std::make_shared<DB::DataTypeString>();
-    const auto * right_arg = &actions_dag->addColumn(std::move(type_name_col));
+    const auto * right_arg = &actions_dag.addColumn(std::move(type_name_col));
     const auto * left_arg = node;
     DB::CastDiagnostic diagnostic = {node->result_name, node->result_name};
+    ColumnWithTypeAndName left_column{nullptr, node->result_type, {}};
     DB::ActionsDAG::NodeRawConstPtrs children = {left_arg, right_arg};
-    return &actions_dag->addFunction(
-        DB::createInternalCastOverloadResolver(cast_type, std::move(diagnostic)), std::move(children), result_name);
+    auto func_base_cast = createInternalCast(std::move(left_column), cast_to_type, cast_type, diagnostic);
+
+    return &actions_dag.addFunction(func_base_cast, std::move(children), result_name);
+}
+
+const DB::ActionsDAG::Node * ActionsDAGUtil::convertNodeTypeIfNeeded(
+    DB::ActionsDAG & actions_dag,
+    const DB::ActionsDAG::Node * node,
+    const DB::DataTypePtr & dst_type,
+    const std::string & result_name,
+    CastType cast_type)
+{
+    if (node->result_type->equals(*dst_type))
+        return node;
+
+    return convertNodeType(actions_dag, node, dst_type, result_name, cast_type);
 }
 
 String QueryPipelineUtil::explainPipeline(DB::QueryPipeline & pipeline)
@@ -462,34 +509,27 @@ String QueryPipelineUtil::explainPipeline(DB::QueryPipeline & pipeline)
 
 using namespace DB;
 
-std::map<std::string, std::string> BackendInitializerUtil::getBackendConfMap(std::string * plan)
+std::map<std::string, std::string> BackendInitializerUtil::getBackendConfMap(std::string_view plan)
 {
     std::map<std::string, std::string> ch_backend_conf;
-    if (plan == nullptr)
+    if (plan.empty())
         return ch_backend_conf;
 
     /// Parse backend configs from plan extensions
     do
     {
-        auto plan_ptr = std::make_unique<substrait::Plan>();
-        auto success = plan_ptr->ParseFromString(*plan);
+        substrait::Plan sPlan;
+        auto success = sPlan.ParseFromString(plan);
         if (!success)
             break;
 
-        if (logger && logger->debug())
-        {
-            namespace pb_util = google::protobuf::util;
-            pb_util::JsonOptions options;
-            std::string json;
-            auto s = pb_util::MessageToJsonString(*plan_ptr, &json, options);
-            if (!s.ok())
-                throw Exception(ErrorCodes::LOGICAL_ERROR, "Can not convert Substrait Plan to Json");
-            LOG_DEBUG(&Poco::Logger::get("CHUtil"), "Update Config Map Plan:\n{}", json);
-        }
+        /// see initLoggers, logger == nullptr which meanas initLoggers is not called.
+        if (logger != nullptr)
+            logDebugMessage(sPlan, "Update Config Map Plan");
 
-        if (!plan_ptr->has_advanced_extensions() || !plan_ptr->advanced_extensions().has_enhancement())
+        if (!sPlan.has_advanced_extensions() || !sPlan.advanced_extensions().has_enhancement())
             break;
-        const auto & enhancement = plan_ptr->advanced_extensions().enhancement();
+        const auto & enhancement = sPlan.advanced_extensions().enhancement();
 
         if (!enhancement.Is<substrait::Expression>())
             break;
@@ -522,6 +562,48 @@ std::map<std::string, std::string> BackendInitializerUtil::getBackendConfMap(std
     return ch_backend_conf;
 }
 
+std::vector<String> BackendInitializerUtil::wrapDiskPathConfig(
+    const String & path_prefix, const String & path_suffix, Poco::Util::AbstractConfiguration & config)
+{
+    std::vector<String> changed_paths;
+    if (path_prefix.empty() && path_suffix.empty())
+        return changed_paths;
+
+    auto change_func = [&](String key) -> void
+    {
+        if (const String value = config.getString(key, ""); value != "")
+        {
+            const String change_value = path_prefix + value + path_suffix;
+            config.setString(key, change_value);
+            changed_paths.emplace_back(change_value);
+            LOG_INFO(getLogger("BackendInitializerUtil"), "Change config `{}` from '{}' to {}.", key, value, change_value);
+        }
+    };
+
+    Poco::Util::AbstractConfiguration::Keys disks;
+    std::unordered_set<String> disk_types = {"s3_gluten", "hdfs_gluten", "cache"};
+    config.keys("storage_configuration.disks", disks);
+
+    std::ranges::for_each(
+        disks,
+        [&](const auto & disk_name)
+        {
+            String disk_prefix = "storage_configuration.disks." + disk_name;
+            String disk_type = config.getString(disk_prefix + ".type", "");
+            if (!disk_types.contains(disk_type))
+                return;
+            if (disk_type == "cache")
+                change_func(disk_prefix + ".path");
+            else if (disk_type == "s3_gluten" || disk_type == "hdfs_gluten")
+                change_func(disk_prefix + ".metadata_path");
+        });
+
+    change_func("path");
+    change_func("gluten_cache.local.path");
+
+    return changed_paths;
+}
+
 DB::Context::ConfigurationPtr BackendInitializerUtil::initConfig(std::map<std::string, std::string> & backend_conf_map)
 {
     DB::Context::ConfigurationPtr config;
@@ -548,8 +630,35 @@ DB::Context::ConfigurationPtr BackendInitializerUtil::initConfig(std::map<std::s
         if (key.starts_with(CH_RUNTIME_CONFIG_PREFIX) && key != CH_RUNTIME_CONFIG_FILE)
         {
             // Apply spark.gluten.sql.columnar.backend.ch.runtime_config.* to config
-            config->setString(key.substr(CH_RUNTIME_CONFIG_PREFIX.size()), value);
+            const auto name = key.substr(CH_RUNTIME_CONFIG_PREFIX.size());
+            if ((name == "storage_configuration.disks.s3.metadata_path" || name == "path") && !value.ends_with("/"))
+                config->setString(name, value + "/");
+            else
+                config->setString(name, value);
         }
+    }
+
+    if (backend_conf_map.contains(GLUTEN_TASK_OFFHEAP))
+    {
+        config->setString(MemoryConfig::CH_TASK_MEMORY, backend_conf_map.at(GLUTEN_TASK_OFFHEAP));
+    }
+
+    const bool use_current_directory_as_tmp = config->getBool("use_current_directory_as_tmp", false);
+    char buffer[PATH_MAX];
+    if (use_current_directory_as_tmp && getcwd(buffer, sizeof(buffer)) != nullptr)
+    {
+        wrapDiskPathConfig(String(buffer), "", *config);
+    }
+
+    const bool reuse_disk_cache = config->getBool("reuse_disk_cache", true);
+
+    if (!reuse_disk_cache)
+    {
+        String pid = std::to_string(static_cast<Int64>(getpid()));
+        auto path_need_clean = wrapDiskPathConfig("", "/" + pid, *config);
+        std::lock_guard lock(BackendFinalizerUtil::paths_mutex);
+        BackendFinalizerUtil::paths_need_to_clean.insert(
+            BackendFinalizerUtil::paths_need_to_clean.end(), path_need_clean.begin(), path_need_clean.end());
     }
     return config;
 }
@@ -571,12 +680,15 @@ void BackendInitializerUtil::initEnvs(DB::Context::ConfigurationPtr config)
     /// Set environment variable TZ if possible
     if (config->has("timezone"))
     {
-        const String timezone_name = config->getString("timezone");
-        if (0 != setenv("TZ", timezone_name.data(), 1)) /// NOLINT
+        const std::string config_timezone = config->getString("timezone");
+        const String mapped_timezone = DateTimeUtil::convertTimeZone(config_timezone);
+        if (0
+            != setenv(
+                "TZ", mapped_timezone.data(), 1)) // NOLINT(concurrency-mt-unsafe) // ok if not called concurrently with other setenv/getenv
             throw Poco::Exception("Cannot setenv TZ variable");
 
         tzset();
-        DateLUT::setDefaultTimezone(timezone_name);
+        DateLUT::setDefaultTimezone(mapped_timezone);
     }
 
     /// Set environment variable LIBHDFS3_CONF if possible
@@ -594,10 +706,24 @@ void BackendInitializerUtil::initEnvs(DB::Context::ConfigurationPtr config)
         spark_user = spark_user_c_str;
 }
 
+DB::Field BackendInitializerUtil::toField(const String & key, const String & value)
+{
+    if (BOOL_VALUE_SETTINGS.contains(key))
+        return DB::Field(value == "true" || value == "1");
+    else if (LONG_VALUE_SETTINGS.contains(key))
+        return DB::Field(std::strtoll(value.c_str(), nullptr, 10));
+    else
+        return DB::Field(value);
+}
+
 void BackendInitializerUtil::initSettings(std::map<std::string, std::string> & backend_conf_map, DB::Settings & settings)
 {
     /// Initialize default setting.
     settings.set("date_time_input_format", "best_effort");
+    settings.set(MERGETREE_MERGE_AFTER_INSERT, true);
+    settings.set(MERGETREE_INSERT_WITHOUT_LOCAL_STORAGE, false);
+    settings.set(DECIMAL_OPERATIONS_ALLOW_PREC_LOSS, true);
+    settings.set("remote_filesystem_read_prefetch", false);
 
     for (const auto & [key, value] : backend_conf_map)
     {
@@ -609,7 +735,8 @@ void BackendInitializerUtil::initSettings(std::map<std::string, std::string> & b
         }
         else if (key.starts_with(CH_RUNTIME_SETTINGS_PREFIX))
         {
-            settings.set(key.substr(CH_RUNTIME_SETTINGS_PREFIX.size()), value);
+            auto k = key.substr(CH_RUNTIME_SETTINGS_PREFIX.size());
+            settings.set(k, toField(k, value));
             LOG_DEBUG(&Poco::Logger::get("CHUtil"), "Set settings key:{} value:{}", key, value);
         }
         else if (key.starts_with(SPARK_HADOOP_PREFIX + S3A_PREFIX))
@@ -624,8 +751,24 @@ void BackendInitializerUtil::initSettings(std::map<std::string, std::string> & b
             // 4. fs.s3a.bucket.bucket_name.assumed.role.externalId (non hadoop official)
             settings.set(key.substr(SPARK_HADOOP_PREFIX.length()), value);
         }
+        else if (key.starts_with(SPARK_DELTA_PREFIX))
+        {
+            auto k = key.substr(SPARK_DELTA_PREFIX.size());
+            settings.set(k, toField(k, value));
+            LOG_DEBUG(&Poco::Logger::get("CHUtil"), "Set settings key:{} value:{}", key, value);
+        }
+        else if (key == SPARK_SESSION_TIME_ZONE)
+        {
+            String time_zone_val = DateTimeUtil::convertTimeZone(value);
+            settings.set("session_timezone", time_zone_val);
+            LOG_DEBUG(&Poco::Logger::get("CHUtil"), "Set settings key:{} value:{}", "session_timezone", time_zone_val);
+        }
+        else if (key == DECIMAL_OPERATIONS_ALLOW_PREC_LOSS)
+        {
+            settings.set(key, toField(key, value));
+            LOG_DEBUG(&Poco::Logger::get("CHUtil"), "Set settings key:{} value:{}", key, value);
+        }
     }
-
     /// Finally apply some fixed kvs to settings.
     settings.set("join_use_nulls", true);
     settings.set("input_format_orc_allow_missing_columns", true);
@@ -647,22 +790,35 @@ void BackendInitializerUtil::initSettings(std::map<std::string, std::string> & b
     settings.set("output_format_json_quote_64bit_integers", false);
     settings.set("output_format_json_quote_denormals", true);
     settings.set("output_format_json_skip_null_value_in_named_tuples", true);
+    settings.set("output_format_json_escape_forward_slashes", false);
     settings.set("function_json_value_return_type_allow_complex", true);
     settings.set("function_json_value_return_type_allow_nullable", true);
     settings.set("precise_float_parsing", true);
+    settings.set("enable_named_columns_in_function_tuple", false);
+    settings.set("datetime64_trim_suffix_zeros", true);
+
+    if (backend_conf_map.contains(GLUTEN_TASK_OFFHEAP))
+    {
+        auto task_memory = std::stoull(backend_conf_map.at(GLUTEN_TASK_OFFHEAP));
+        if (!backend_conf_map.contains(CH_RUNTIME_SETTINGS_PREFIX + "max_bytes_before_external_sort"))
+        {
+            settings[Setting::max_bytes_before_external_sort] = static_cast<size_t>(0.8 * task_memory);
+        }
+        if (!backend_conf_map.contains(CH_RUNTIME_SETTINGS_PREFIX + "prefer_external_sort_block_bytes"))
+        {
+            auto mem_gb = task_memory / static_cast<double>(1_GiB);
+            // 2.8x+5, Heuristics calculate the block size of external sort, [8,16]
+            settings[Setting::prefer_external_sort_block_bytes] = std::max(std::min(static_cast<size_t>(2.8 * mem_gb + 5), 16ul), 8ul) * 1024 * 1024;
+        }
+    }
 }
 
 void BackendInitializerUtil::initContexts(DB::Context::ConfigurationPtr config)
 {
     /// Make sure global_context and shared_context are constructed only once.
-    auto & shared_context = SerializedPlanParser::shared_context;
-    if (!shared_context.get())
-        shared_context = SharedContextHolder(Context::createShared());
-
-    auto & global_context = SerializedPlanParser::global_context;
-    if (!global_context)
+    if (auto global_context = QueryContext::globalMutableContext(); !global_context)
     {
-        global_context = Context::createGlobal(shared_context.get());
+        global_context = QueryContext::createGlobal();
         global_context->makeGlobalContext();
         global_context->setConfig(config);
 
@@ -679,6 +835,11 @@ void BackendInitializerUtil::initContexts(DB::Context::ConfigurationPtr config)
         global_context->setTemporaryStoragePath(config->getString("tmp_path", getDefaultPath()), 0);
         global_context->setPath(config->getString("path", "/"));
 
+        String uncompressed_cache_policy = config->getString("uncompressed_cache_policy", DEFAULT_UNCOMPRESSED_CACHE_POLICY);
+        size_t uncompressed_cache_size = config->getUInt64("uncompressed_cache_size", DEFAULT_UNCOMPRESSED_CACHE_MAX_SIZE);
+        double uncompressed_cache_size_ratio = config->getDouble("uncompressed_cache_size_ratio", DEFAULT_UNCOMPRESSED_CACHE_SIZE_RATIO);
+        global_context->setUncompressedCache(uncompressed_cache_policy, uncompressed_cache_size, uncompressed_cache_size_ratio);
+
         String mark_cache_policy = config->getString("mark_cache_policy", DEFAULT_MARK_CACHE_POLICY);
         size_t mark_cache_size = config->getUInt64("mark_cache_size", DEFAULT_MARK_CACHE_MAX_SIZE);
         double mark_cache_size_ratio = config->getDouble("mark_cache_size_ratio", DEFAULT_MARK_CACHE_SIZE_RATIO);
@@ -687,16 +848,39 @@ void BackendInitializerUtil::initContexts(DB::Context::ConfigurationPtr config)
 
         global_context->setMarkCache(mark_cache_policy, mark_cache_size, mark_cache_size_ratio);
 
+        String index_uncompressed_cache_policy
+            = config->getString("index_uncompressed_cache_policy", DEFAULT_INDEX_UNCOMPRESSED_CACHE_POLICY);
+        size_t index_uncompressed_cache_size
+            = config->getUInt64("index_uncompressed_cache_size", DEFAULT_INDEX_UNCOMPRESSED_CACHE_MAX_SIZE);
+        double index_uncompressed_cache_size_ratio
+            = config->getDouble("index_uncompressed_cache_size_ratio", DEFAULT_INDEX_UNCOMPRESSED_CACHE_SIZE_RATIO);
+        global_context->setIndexUncompressedCache(
+            index_uncompressed_cache_policy, index_uncompressed_cache_size, index_uncompressed_cache_size_ratio);
+
         String index_mark_cache_policy = config->getString("index_mark_cache_policy", DEFAULT_INDEX_MARK_CACHE_POLICY);
         size_t index_mark_cache_size = config->getUInt64("index_mark_cache_size", DEFAULT_INDEX_MARK_CACHE_MAX_SIZE);
         double index_mark_cache_size_ratio = config->getDouble("index_mark_cache_size_ratio", DEFAULT_INDEX_MARK_CACHE_SIZE_RATIO);
         global_context->setIndexMarkCache(index_mark_cache_policy, index_mark_cache_size, index_mark_cache_size_ratio);
+
+        size_t mmap_cache_size = config->getUInt64("mmap_cache_size", DEFAULT_MMAP_CACHE_MAX_SIZE);
+        global_context->setMMappedFileCache(mmap_cache_size);
+
+        /// Initialize a dummy query cache.
+        global_context->setQueryCache(0, 0, 0, 0);
+
+        // We must set the application type to CLIENT to avoid ServerUUID::get() throw exception
+        global_context->setApplicationType(Context::ApplicationType::CLIENT);
+    }
+    else
+    {
+        // just for ut
+        global_context->updateStorageConfiguration(*config);
     }
 }
 
-void BackendInitializerUtil::applyGlobalConfigAndSettings(DB::Context::ConfigurationPtr config, DB::Settings & settings)
+void BackendInitializerUtil::applyGlobalConfigAndSettings(const DB::Context::ConfigurationPtr & config, const DB::Settings & settings)
 {
-    auto & global_context = SerializedPlanParser::global_context;
+    const auto global_context = QueryContext::globalMutableContext();
     global_context->setConfig(config);
     global_context->setSettings(settings);
 }
@@ -708,6 +892,7 @@ void BackendInitializerUtil::updateNewSettings(const DB::ContextMutablePtr & con
 
 extern void registerAggregateFunctionCombinatorPartialMerge(AggregateFunctionCombinatorFactory &);
 extern void registerAggregateFunctionsBloomFilter(AggregateFunctionFactory &);
+extern void registerAggregateFunctionSparkAvg(AggregateFunctionFactory &);
 extern void registerFunctions(FunctionFactory &);
 
 void registerAllFunctions()
@@ -717,22 +902,18 @@ void registerAllFunctions()
     DB::registerAggregateFunctions();
     auto & agg_factory = AggregateFunctionFactory::instance();
     registerAggregateFunctionsBloomFilter(agg_factory);
-
+    registerAggregateFunctionSparkAvg(agg_factory);
     {
         /// register aggregate function combinators from local_engine
         auto & factory = AggregateFunctionCombinatorFactory::instance();
         registerAggregateFunctionCombinatorPartialMerge(factory);
     }
-
 }
 
 void registerGlutenDisks()
 {
     registerDisks(true);
-
-#if USE_AWS_S3
     registerGlutenDisks(true);
-#endif
 }
 
 void BackendInitializerUtil::registerAllFactories()
@@ -766,14 +947,7 @@ void BackendInitializerUtil::initCompiledExpressionCache(DB::Context::Configurat
 #endif
 }
 
-void BackendInitializerUtil::init_json(std::string * plan_json)
-{
-    auto plan_ptr = std::make_unique<substrait::Plan>();
-    google::protobuf::util::JsonStringToMessage(plan_json->c_str(), plan_ptr.get());
-    return init(new String(plan_ptr->SerializeAsString()));
-}
-
-void BackendInitializerUtil::init(std::string * plan)
+void BackendInitializerUtil::init(const std::string_view plan)
 {
     std::map<std::string, std::string> backend_conf_map = getBackendConfMap(plan);
     DB::Context::ConfigurationPtr config = initConfig(backend_conf_map);
@@ -800,6 +974,9 @@ void BackendInitializerUtil::init(std::string * plan)
     // Init the table metadata cache map
     StorageMergeTreeFactory::init_cache_map();
 
+    JobScheduler::initialize(QueryContext::globalContext());
+    CacheManager::initialize(QueryContext::globalMutableContext());
+
     std::call_once(
         init_flag,
         [&]
@@ -819,17 +996,26 @@ void BackendInitializerUtil::init(std::string * plan)
                 active_parts_loading_threads,
                 0, // We don't need any threads one all the parts will be loaded
                 active_parts_loading_threads);
+
+            const size_t cleanup_threads = config->getUInt("max_parts_cleaning_thread_pool_size", 128);
+            getPartsCleaningThreadPool().initialize(
+                cleanup_threads,
+                0, // We don't need any threads one all the parts will be deleted
+                cleanup_threads);
+
+            // Avoid using LD_PRELOAD in child process
+            unsetenv("LD_PRELOAD");
         });
 }
 
-void BackendInitializerUtil::updateConfig(const DB::ContextMutablePtr & context, std::string * plan)
+void BackendInitializerUtil::updateConfig(const DB::ContextMutablePtr & context, std::string_view plan)
 {
     std::map<std::string, std::string> backend_conf_map = getBackendConfMap(plan);
 
     // configs cannot be updated per query
     // settings can be updated per query
 
-    auto settings = context->getSettings(); // make a copy
+    auto settings = context->getSettingsCopy(); // make a copy
     initSettings(backend_conf_map, settings);
     updateNewSettings(context, settings);
 }
@@ -839,34 +1025,39 @@ void BackendFinalizerUtil::finalizeGlobally()
     // Make sure client caches release before ClientCacheRegistry
     ReadBufferBuilderFactory::instance().clean();
     StorageMergeTreeFactory::clear();
-    auto & global_context = SerializedPlanParser::global_context;
-    auto & shared_context = SerializedPlanParser::shared_context;
-    if (global_context)
-    {
-        global_context->shutdown();
-        global_context.reset();
-        shared_context.reset();
-    }
+    QueryContext::resetGlobal();
+    std::lock_guard lock(paths_mutex);
+    std::ranges::for_each(
+        paths_need_to_clean,
+        [](const auto & path)
+        {
+            if (fs::exists(path))
+                fs::remove_all(path);
+        });
+    paths_need_to_clean.clear();
 }
 
 void BackendFinalizerUtil::finalizeSessionally()
 {
 }
 
+std::vector<String> BackendFinalizerUtil::paths_need_to_clean;
+
+std::mutex BackendFinalizerUtil::paths_mutex;
+
 Int64 DateTimeUtil::currentTimeMillis()
 {
     return timeInMilliseconds(std::chrono::system_clock::now());
 }
 
-UInt64 MemoryUtil::getCurrentMemoryUsage(size_t depth)
+String DateTimeUtil::convertTimeZone(const String & time_zone)
 {
-    Int64 current_memory_usage = 0;
-    auto * current_mem_tracker = DB::CurrentThread::getMemoryTracker();
-    for (size_t i = 0; i < depth && current_mem_tracker; ++i)
-        current_mem_tracker = current_mem_tracker->getParent();
-    if (current_mem_tracker)
-        current_memory_usage = current_mem_tracker->get();
-    return current_memory_usage < 0 ? 0 : current_memory_usage;
+    String res = time_zone;
+    /// Convert timezone ID like '+08:00' to GMT+8:00
+    if (time_zone.starts_with("+") || time_zone.starts_with("-"))
+        res = "GMT" + time_zone;
+    res = DateLUT::mappingForJavaTimezone(res);
+    return res;
 }
 
 UInt64 MemoryUtil::getMemoryRSS()
@@ -880,6 +1071,59 @@ UInt64 MemoryUtil::getMemoryRSS()
     fscanf(fp, "%*s%ld", &rss);
     fclose(fp);
     return rss * sysconf(_SC_PAGESIZE);
+}
+
+
+void JoinUtil::reorderJoinOutput(DB::QueryPlan & plan, DB::Names cols)
+{
+    ActionsDAG project{plan.getCurrentDataStream().header.getNamesAndTypesList()};
+    NamesWithAliases project_cols;
+    for (const auto & col : cols)
+    {
+        project_cols.emplace_back(NameWithAlias(col, col));
+    }
+    project.project(project_cols);
+    QueryPlanStepPtr project_step = std::make_unique<ExpressionStep>(plan.getCurrentDataStream(), std::move(project));
+    project_step->setStepDescription("Reorder Join Output");
+    plan.addStep(std::move(project_step));
+}
+
+std::pair<DB::JoinKind, DB::JoinStrictness>
+JoinUtil::getJoinKindAndStrictness(substrait::JoinRel_JoinType join_type, bool is_existence_join)
+{
+    switch (join_type)
+    {
+        case substrait::JoinRel_JoinType_JOIN_TYPE_INNER:
+            return {DB::JoinKind::Inner, DB::JoinStrictness::All};
+        case substrait::JoinRel_JoinType_JOIN_TYPE_LEFT_SEMI: {
+            if (is_existence_join)
+                return {DB::JoinKind::Left, DB::JoinStrictness::Any};
+            return {DB::JoinKind::Left, DB::JoinStrictness::Semi};
+        }
+        case substrait::JoinRel_JoinType_JOIN_TYPE_LEFT_ANTI:
+            return {DB::JoinKind::Left, DB::JoinStrictness::Anti};
+        case substrait::JoinRel_JoinType_JOIN_TYPE_LEFT:
+            return {DB::JoinKind::Left, DB::JoinStrictness::All};
+        case substrait::JoinRel_JoinType_JOIN_TYPE_RIGHT:
+            return {DB::JoinKind::Right, DB::JoinStrictness::All};
+        case substrait::JoinRel_JoinType_JOIN_TYPE_OUTER:
+            return {DB::JoinKind::Full, DB::JoinStrictness::All};
+        default:
+            throw Exception(ErrorCodes::UNKNOWN_TYPE, "unsupported join type {}.", magic_enum::enum_name(join_type));
+    }
+}
+
+std::pair<DB::JoinKind, DB::JoinStrictness> JoinUtil::getCrossJoinKindAndStrictness(substrait::CrossRel_JoinType join_type)
+{
+    switch (join_type)
+    {
+        case substrait::CrossRel_JoinType_JOIN_TYPE_INNER:
+        case substrait::CrossRel_JoinType_JOIN_TYPE_LEFT:
+        case substrait::CrossRel_JoinType_JOIN_TYPE_OUTER:
+            return {DB::JoinKind::Cross, DB::JoinStrictness::All};
+        default:
+            throw Exception(ErrorCodes::UNKNOWN_TYPE, "unsupported join type {}.", magic_enum::enum_name(join_type));
+    }
 }
 
 }

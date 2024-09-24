@@ -22,7 +22,7 @@
 #include <Core/ColumnsWithTypeAndName.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypesNumber.h>
-#include <Operator/ExpandTransorm.h>
+#include <Operator/ExpandTransform.h>
 #include <Processors/Chunk.h>
 #include <Processors/IProcessor.h>
 #include <Processors/Transforms/AggregatingTransform.h>
@@ -116,7 +116,7 @@ public:
             has_input = true;
             output_chunk = DB::Chunk(result_cols, 1);
             auto info = std::make_shared<DB::AggregatedChunkInfo>();
-            output_chunk.setChunkInfo(info);
+            output_chunk.getChunkInfos().add(std::move(info));
             return Status::Ready;
         }
 
@@ -124,10 +124,10 @@ public:
         if (input.hasData())
         {
             output_chunk = input.pull(true);
-            if (!output_chunk.hasChunkInfo())
+            if (output_chunk.getChunkInfos().empty())
             {
                 auto info = std::make_shared<DB::AggregatedChunkInfo>();
-                output_chunk.setChunkInfo(info);
+                output_chunk.getChunkInfos().add(std::move(info));
             }
             has_input = true;
             return Status::Ready;
@@ -145,7 +145,7 @@ private:
 };
 
 DefaultHashAggregateResultStep::DefaultHashAggregateResultStep(const DB::DataStream & input_stream_)
-    : DB::ITransformingStep(input_stream_, input_stream_.header, getTraits())
+    : DB::ITransformingStep(input_stream_, adjustOutputHeader(input_stream_.header), getTraits())
 {
 }
 

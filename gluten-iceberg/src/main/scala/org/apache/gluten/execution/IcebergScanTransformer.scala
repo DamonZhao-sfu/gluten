@@ -48,11 +48,14 @@ case class IcebergScanTransformer(
 
   override def filterExprs(): Seq[Expression] = pushdownFilters.getOrElse(Seq.empty)
 
-  override def getPartitionSchema: StructType = GlutenIcebergSourceUtil.getPartitionSchema(scan)
+  override def getPartitionSchema: StructType = GlutenIcebergSourceUtil.getReadPartitionSchema(scan)
 
   override def getDataSchema: StructType = new StructType()
 
   override def getInputFilePathsInternal: Seq[String] = Seq.empty
+
+  // TODO: get root paths from table.
+  override def getRootPathsInternal: Seq[String] = Seq.empty
 
   override lazy val fileFormat: ReadFileFormat = GlutenIcebergSourceUtil.getFileFormat(scan)
 
@@ -63,7 +66,7 @@ case class IcebergScanTransformer(
       filteredPartitions,
       outputPartitioning)
     groupedPartitions.zipWithIndex.map {
-      case (p, index) => GlutenIcebergSourceUtil.genSplitInfo(p, index)
+      case (p, index) => GlutenIcebergSourceUtil.genSplitInfo(p, index, getPartitionSchema)
     }
   }
 
@@ -80,13 +83,11 @@ case class IcebergScanTransformer(
 }
 
 object IcebergScanTransformer {
-  def apply(
-      batchScan: BatchScanExec,
-      newPartitionFilters: Seq[Expression]): IcebergScanTransformer = {
+  def apply(batchScan: BatchScanExec): IcebergScanTransformer = {
     new IcebergScanTransformer(
       batchScan.output,
       batchScan.scan,
-      newPartitionFilters,
+      batchScan.runtimeFilters,
       table = SparkShimLoader.getSparkShims.getBatchScanExecTable(batchScan),
       keyGroupedPartitioning = SparkShimLoader.getSparkShims.getKeyGroupedPartitioning(batchScan),
       commonPartitionValues = SparkShimLoader.getSparkShims.getCommonPartitionValues(batchScan)

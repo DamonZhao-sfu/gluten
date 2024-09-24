@@ -16,6 +16,7 @@
  */
 #include <cstring>
 #include <vector>
+#include <Core/Settings.h>
 #include <IO/ReadBufferFromFileDescriptor.h>
 #include <IO/ReadHelpers.h>
 #include <IO/WriteBufferFromFileDescriptorDiscardOnFailure.h>
@@ -25,6 +26,8 @@
 #include <base/phdr_cache.h>
 #include <base/sleep.h>
 #include <Poco/Exception.h>
+#include <Poco/Runnable.h>
+#include <Poco/Thread.h>
 #include <Common/CurrentThread.h>
 #include <Common/GlutenSignalHandler.h>
 #include <Common/MemoryTracker.h>

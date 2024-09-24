@@ -19,8 +19,8 @@ package org.apache.gluten.execution
 import org.apache.gluten.columnarbatch.ColumnarBatches
 import org.apache.gluten.exception.GlutenNotSupportException
 import org.apache.gluten.extension.ValidationResult
-import org.apache.gluten.memory.nmm.NativeMemoryManagers
-import org.apache.gluten.utils.Iterators
+import org.apache.gluten.iterator.Iterators
+import org.apache.gluten.runtime.Runtimes
 import org.apache.gluten.vectorized.NativeColumnarToRowJniWrapper
 
 import org.apache.spark.broadcast.Broadcast
@@ -66,7 +66,7 @@ case class VeloxColumnarToRowExec(child: SparkPlan) extends ColumnarToRowExecBas
               s"VeloxColumnarToRowExec.")
       }
     }
-    ValidationResult.ok
+    ValidationResult.succeeded
   }
 
   override def doExecuteInternal(): RDD[InternalRow] = {
@@ -75,13 +75,8 @@ case class VeloxColumnarToRowExec(child: SparkPlan) extends ColumnarToRowExecBas
     val convertTime = longMetric("convertTime")
     child.executeColumnar().mapPartitions {
       it =>
-        VeloxColumnarToRowExec.toRowIterator(
-          it,
-          output,
-          numOutputRows,
-          numInputBatches,
-          convertTime
-        )
+        VeloxColumnarToRowExec
+          .toRowIterator(it, output, numOutputRows, numInputBatches, convertTime)
     }
   }
 
@@ -96,13 +91,7 @@ case class VeloxColumnarToRowExec(child: SparkPlan) extends ColumnarToRowExecBas
       sparkContext,
       mode,
       relation,
-      VeloxColumnarToRowExec.toRowIterator(
-        _,
-        output,
-        numOutputRows,
-        numInputBatches,
-        convertTime
-      ))
+      VeloxColumnarToRowExec.toRowIterator(_, output, numOutputRows, numInputBatches, convertTime))
   }
 
   protected def withNewChildInternal(newChild: SparkPlan): VeloxColumnarToRowExec =
@@ -110,6 +99,22 @@ case class VeloxColumnarToRowExec(child: SparkPlan) extends ColumnarToRowExecBas
 }
 
 object VeloxColumnarToRowExec {
+
+  def toRowIterator(
+      batches: Iterator[ColumnarBatch],
+      output: Seq[Attribute]): Iterator[InternalRow] = {
+    val numOutputRows = new SQLMetric("numOutputRows")
+    val numInputBatches = new SQLMetric("numInputBatches")
+    val convertTime = new SQLMetric("convertTime")
+    toRowIterator(
+      batches,
+      output,
+      numOutputRows,
+      numInputBatches,
+      convertTime
+    )
+  }
+
   def toRowIterator(
       batches: Iterator[ColumnarBatch],
       output: Seq[Attribute],
@@ -120,10 +125,10 @@ object VeloxColumnarToRowExec {
       return Iterator.empty
     }
 
+    val runtime = Runtimes.contextInstance("ColumnarToRow")
     // TODO:: pass the jni jniWrapper and arrowSchema  and serializeSchema method by broadcast
-    val jniWrapper = NativeColumnarToRowJniWrapper.create()
-    val c2rId = jniWrapper.nativeColumnarToRowInit(
-      NativeMemoryManagers.contextInstance("ColumnarToRow").getNativeInstanceHandle)
+    val jniWrapper = NativeColumnarToRowJniWrapper.create(runtime)
+    val c2rId = jniWrapper.nativeColumnarToRowInit()
 
     val res: Iterator[Iterator[InternalRow]] = new Iterator[Iterator[InternalRow]] {
 
@@ -158,13 +163,14 @@ object VeloxColumnarToRowExec {
           val rows = batch.numRows()
           val beforeConvert = System.currentTimeMillis()
           val batchHandle = ColumnarBatches.getNativeHandle(batch)
-          val info =
-            jniWrapper.nativeColumnarToRowConvert(batchHandle, c2rId)
+          var info =
+            jniWrapper.nativeColumnarToRowConvert(c2rId, batchHandle, 0)
 
           convertTime += (System.currentTimeMillis() - beforeConvert)
 
           new Iterator[InternalRow] {
             var rowId = 0
+            var baseLength = 0
             val row = new UnsafeRow(cols)
 
             override def hasNext: Boolean = {
@@ -172,7 +178,14 @@ object VeloxColumnarToRowExec {
             }
 
             override def next: UnsafeRow = {
-              val (offset, length) = (info.offsets(rowId), info.lengths(rowId))
+              if (rowId == baseLength + info.lengths.length) {
+                baseLength += info.lengths.length
+                val before = System.currentTimeMillis()
+                info = jniWrapper.nativeColumnarToRowConvert(c2rId, batchHandle, rowId)
+                convertTime += (System.currentTimeMillis() - before)
+              }
+              val (offset, length) =
+                (info.offsets(rowId - baseLength), info.lengths(rowId - baseLength))
               row.pointTo(null, info.memoryAddress + offset, length)
               rowId += 1
               row

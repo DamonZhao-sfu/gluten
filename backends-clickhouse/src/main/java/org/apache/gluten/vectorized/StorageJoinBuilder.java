@@ -17,6 +17,7 @@
 package org.apache.gluten.vectorized;
 
 import org.apache.gluten.execution.BroadCastHashJoinContext;
+import org.apache.gluten.execution.JoinTypeTransform;
 import org.apache.gluten.expression.ConverterUtils;
 import org.apache.gluten.expression.ConverterUtils$;
 import org.apache.gluten.substrait.type.TypeNode;
@@ -44,7 +45,11 @@ public class StorageJoinBuilder {
       long rowCount,
       String joinKeys,
       int joinType,
-      byte[] namedStruct);
+      boolean hasMixedFiltCondition,
+      boolean isExistenceJoin,
+      byte[] namedStruct,
+      boolean isNullAwareAntiJoin,
+      boolean hasNullKeyValues);
 
   private StorageJoinBuilder() {}
 
@@ -54,7 +59,8 @@ public class StorageJoinBuilder {
       long rowCount,
       BroadCastHashJoinContext broadCastContext,
       List<Expression> newBuildKeys,
-      List<Attribute> newOutput) {
+      List<Attribute> newOutput,
+      boolean hasNullKeyValues) {
     ConverterUtils$ converter = ConverterUtils$.MODULE$;
     List<Expression> keys;
     List<Attribute> output;
@@ -73,13 +79,27 @@ public class StorageJoinBuilder {
                   return converter.genColumnNameWithExprId(attr);
                 })
             .collect(Collectors.joining(","));
+
+    int joinType;
+    if (broadCastContext.buildHashTableId().startsWith("BuiltBNLJBroadcastTable-")) {
+      joinType = SubstraitUtil.toCrossRelSubstrait(broadCastContext.joinType()).ordinal();
+    } else {
+      boolean buildRight = broadCastContext.buildRight();
+      joinType =
+          JoinTypeTransform.toSubstraitJoinType(broadCastContext.joinType(), buildRight).ordinal();
+    }
+
     return nativeBuild(
         broadCastContext.buildHashTableId(),
         batches,
         rowCount,
         joinKey,
-        SubstraitUtil.toSubstrait(broadCastContext.joinType()).ordinal(),
-        toNameStruct(output).toByteArray());
+        joinType,
+        broadCastContext.hasMixedFiltCondition(),
+        broadCastContext.isExistenceJoin(),
+        toNameStruct(output).toByteArray(),
+        broadCastContext.isNullAwareAntiJoin(),
+        hasNullKeyValues);
   }
 
   /** create table named struct */

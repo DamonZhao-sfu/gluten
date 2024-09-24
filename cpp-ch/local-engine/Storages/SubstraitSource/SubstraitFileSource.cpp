@@ -33,7 +33,7 @@
 #include <Storages/SubstraitSource/SubstraitFileSource.h>
 #include <Common/CHUtil.h>
 #include <Common/Exception.h>
-#include <Common/StringUtils.h>
+#include <Common/GlutenStringUtils.h>
 #include <Common/typeid_cast.h>
 #include "DataTypes/DataTypesDecimal.h"
 
@@ -53,12 +53,28 @@ namespace local_engine
 // build blocks with a const virtual column to indicate how many rows is in it.
 static DB::Block getRealHeader(const DB::Block & header)
 {
-    return header ? header : BlockUtil::buildRowCountHeader();
+    auto header_without_input_file_columns = InputFileNameParser::removeInputFileColumn(header);
+    auto result_header = header;
+    if (!header_without_input_file_columns.columns())
+    {
+        auto virtual_header =  BlockUtil::buildRowCountHeader();
+        for (const auto & column_with_type_and_name : virtual_header.getColumnsWithTypeAndName())
+        {
+            result_header.insert(column_with_type_and_name);
+        }
+    }
+    return result_header;
 }
 
 SubstraitFileSource::SubstraitFileSource(
-    const DB::ContextPtr & context_, const DB::Block & header_, const substrait::ReadRel::LocalFiles & file_infos)
-    : DB::SourceWithKeyCondition(getRealHeader(header_), false), context(context_), output_header(header_), to_read_header(output_header)
+    const DB::ContextPtr & context_,
+    const DB::Block & header_,
+    const substrait::ReadRel::LocalFiles & file_infos)
+    : DB::SourceWithKeyCondition(getRealHeader(header_), false)
+    , context(context_)
+    , output_header(InputFileNameParser::removeInputFileColumn(header_))
+    , to_read_header(output_header)
+    , input_file_name(InputFileNameParser::containsInputFileColumns(header_))
 {
     if (file_infos.items_size())
     {
@@ -76,11 +92,11 @@ SubstraitFileSource::SubstraitFileSource(
     }
 }
 
-void SubstraitFileSource::setKeyCondition(const DB::ActionsDAGPtr & filter_actions_dag, DB::ContextPtr context_)
+void SubstraitFileSource::setKeyCondition(const std::optional<DB::ActionsDAG> & filter_actions_dag, DB::ContextPtr context_)
 {
     setKeyConditionImpl(filter_actions_dag, context_, to_read_header);
     if (filter_actions_dag)
-        column_index_filter = std::make_shared<ColumnIndexFilter>(filter_actions_dag, context_);
+        column_index_filter = std::make_shared<ColumnIndexFilter>(filter_actions_dag.value(), context_);
 }
 
 DB::Chunk SubstraitFileSource::generate()
@@ -95,7 +111,11 @@ DB::Chunk SubstraitFileSource::generate()
 
         DB::Chunk chunk;
         if (file_reader->pull(chunk))
+        {
+            if (input_file_name)
+                input_file_name_parser.addInputFileColumnsToChunk(output.getHeader(), chunk);
             return chunk;
+        }
 
         /// try to read from next file
         file_reader.reset();
@@ -104,6 +124,9 @@ DB::Chunk SubstraitFileSource::generate()
 
 bool SubstraitFileSource::tryPrepareReader()
 {
+    if (isCancelled())
+        return false;
+
     if (file_reader)
         return true;
 
@@ -135,9 +158,18 @@ bool SubstraitFileSource::tryPrepareReader()
     }
     else
         file_reader = std::make_unique<NormalFileReader>(current_file, context, to_read_header, output_header);
-
+    input_file_name_parser.setFileName(current_file->getURIPath());
+    input_file_name_parser.setBlockStart(current_file->getStartOffset());
+    input_file_name_parser.setBlockLength(current_file->getLength());
     file_reader->applyKeyCondition(key_condition, column_index_filter);
     return true;
+}
+
+
+void SubstraitFileSource::onCancel() noexcept
+{
+    if (file_reader)
+        file_reader->cancel();
 }
 
 DB::ColumnPtr FileReaderWrapper::createConstColumn(DB::DataTypePtr data_type, const DB::Field & field, size_t rows)
@@ -152,7 +184,7 @@ DB::ColumnPtr FileReaderWrapper::createConstColumn(DB::DataTypePtr data_type, co
 
 DB::ColumnPtr FileReaderWrapper::createColumn(const String & value, DB::DataTypePtr type, size_t rows)
 {
-    if (StringUtils::isNullPartitionValue(value))
+    if (GlutenStringUtils::isNullPartitionValue(value))
     {
         if (!type->isNullable())
             throw DB::Exception(DB::ErrorCodes::LOGICAL_ERROR, "Partition column is null value,but column data type is not nullable.");
@@ -280,9 +312,13 @@ ConstColumnsFileReader::ConstColumnsFileReader(FormatFilePtr file_, DB::ContextP
     remained_rows = *rows;
 }
 
+
 bool ConstColumnsFileReader::pull(DB::Chunk & chunk)
 {
-    if (!remained_rows) [[unlikely]]
+    if (isCancelled())
+        return false;
+
+    if (!remained_rows)
         return false;
 
     size_t to_read_rows = 0;
@@ -296,6 +332,7 @@ bool ConstColumnsFileReader::pull(DB::Chunk & chunk)
         to_read_rows = block_size;
         remained_rows -= block_size;
     }
+
     DB::Columns res_columns;
     if (const size_t col_num = header.columns())
     {
@@ -307,8 +344,9 @@ bool ConstColumnsFileReader::pull(DB::Chunk & chunk)
             auto type = col_with_name_and_type.type;
             const auto & name = col_with_name_and_type.name;
             auto it = partition_values.find(name);
-            if (it == partition_values.end()) [[unlikely]]
+            if (it == partition_values.end())
                 throw DB::Exception(DB::ErrorCodes::LOGICAL_ERROR, "Unknow partition column : {}", name);
+
             res_columns.emplace_back(createColumn(it->second, type, to_read_rows));
         }
     }
@@ -331,6 +369,9 @@ NormalFileReader::NormalFileReader(
 
 bool NormalFileReader::pull(DB::Chunk & chunk)
 {
+    if (isCancelled())
+        return false;
+
     DB::Chunk raw_chunk = input_format->input->generate();
     const size_t rows = raw_chunk.getNumRows();
     if (!rows)
