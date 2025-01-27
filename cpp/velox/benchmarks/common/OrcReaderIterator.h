@@ -84,28 +84,6 @@ class OrcReaderIterator : public FileReaderIterator {
   std::shared_ptr<arrow::RecordBatchReader> recordBatchReader_;
 };
 
-/*void copy_data_simd(unsigned char* src, unsigned char* dest, size_t size, size_t offset) {
-    // Pointer to the destination with the offset
-    unsigned char* dest_ptr = dest + offset;
-
-    // Process data in 64-byte chunks using AVX-512
-    size_t avx512_chunk_size = 64;
-    size_t i = 0;
-
-    // Use AVX-512 to copy data in 64-byte chunks
-    for (; i + avx512_chunk_size <= size; i += avx512_chunk_size) {
-        // Load 64 bytes from the source
-        __m512i data = _mm512_loadu_si512(reinterpret_cast<const __m512i*>(src + i));
-        // Store 64 bytes to the destination
-        _mm512_storeu_si512(reinterpret_cast<__m512i*>(dest_ptr + i), data);
-    }
-
-    // Copy the remaining bytes that do not fit into 64-byte chunks
-    for (; i < size; ++i) {
-        dest_ptr[i] = src[i];
-    }
-}*/
-
 class FORCReaderIterator final : public OrcReaderIterator {
   public: FORCReaderIterator(const std::string& path) : OrcReaderIterator(path) {
 
